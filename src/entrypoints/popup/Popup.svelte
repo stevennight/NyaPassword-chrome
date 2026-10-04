@@ -21,6 +21,11 @@
   let open = $state<ItemView | null>(null);
   let generated = $state('');
   let toastText = $state('');
+  // extension-only settings (chrome.storage.local)
+  let settingsOpen = $state(false);
+  let autofillOnLoad = $state(false);
+  let lockOnScreenLock = $state(true);
+  let neverSave = $state<string[]>([]);
 
   onMount(async () => {
     vault.bridge = bridge; // TotpCode reads vault.bridge
@@ -94,6 +99,21 @@
     await refresh();
   }
 
+  async function openSettings() {
+    const s = await chrome.storage.local.get(['autofillOnLoad', 'lockOnScreenLock', 'neverSave']);
+    autofillOnLoad = s.autofillOnLoad === true;
+    lockOnScreenLock = s.lockOnScreenLock !== false;
+    neverSave = (s.neverSave as string[] | undefined) ?? [];
+    settingsOpen = !settingsOpen;
+  }
+
+  const setOpt = (key: string, value: unknown) => chrome.storage.local.set({ [key]: value });
+
+  async function allowSave(origin: string) {
+    neverSave = neverSave.filter((o) => o !== origin);
+    await setOpt('neverSave', neverSave);
+  }
+
   function gen() {
     generated = bridge.generate({ kind: 'random', length: 20, upper: true, lower: true, digits: true, symbols: true, avoid_ambiguous: true }).password;
   }
@@ -102,8 +122,25 @@
 <div class="pop">
   <header class="row">
     <Logo size={22} /><b>NyaPassword</b><span class="spacer"></span>
+    {#if lockSt?.signed_in}<button class="btn ghost sm" onclick={openSettings} title="扩展设置" aria-expanded={settingsOpen}>⚙</button>{/if}
     {#if lockSt?.unlocked}<button class="btn ghost sm" onclick={lock} title="锁定">🔒</button>{/if}
   </header>
+
+  {#if settingsOpen}
+    <div class="settings">
+      <label class="opt"><input type="checkbox" checked={autofillOnLoad} onchange={(e) => setOpt('autofillOnLoad', (autofillOnLoad = (e.target as HTMLInputElement).checked))} />
+        <span>打开页面时自动填写<span class="faint small">只有一个匹配的登录、且是 https 页面时填写用户名和密码</span></span></label>
+      <label class="opt"><input type="checkbox" checked={lockOnScreenLock} onchange={(e) => setOpt('lockOnScreenLock', (lockOnScreenLock = (e.target as HTMLInputElement).checked))} />
+        <span>电脑锁屏时锁定</span></label>
+      {#if neverSave.length}
+        <div class="grp">不再询问保存的网站</div>
+        {#each neverSave as o (o)}
+          <div class="row never"><span class="grow small">{o}</span><button class="btn ghost sm" onclick={() => allowSave(o)}>移除</button></div>
+        {/each}
+      {/if}
+      <div class="faint small">自动锁定时间等其他设置在密码库的“设置”里。</div>
+    </div>
+  {/if}
 
   {#if !lockSt}
     <div class="center faint">…</div>
@@ -181,6 +218,10 @@
   .acts { display: flex; gap: 6px; padding: 0 4px 6px 42px; flex-wrap: wrap; }
   .pad { padding: 6px 4px; }
   .gen { display: flex; gap: 8px; align-items: center; background: var(--surface-2); border-radius: 8px; padding: 6px 8px; word-break: break-all; }
+  .settings { display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); border-radius: 10px; padding: 10px; }
+  .settings .opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+  .settings .opt span { display: flex; flex-direction: column; gap: 2px; }
+  .never { gap: 6px; word-break: break-all; }
   footer { border-top: 1px solid var(--border); padding-top: 6px; }
   .toast { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); background: var(--text); color: var(--surface); font-size: 12.5px; padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
 </style>

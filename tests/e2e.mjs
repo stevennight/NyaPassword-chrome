@@ -10,6 +10,7 @@ import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +21,17 @@ const ext = path.join(root, '.output', 'chrome-mv3');
 const pages = path.resolve(root, '..', 'common', 'autofill', 'pages');
 const exeName = process.platform === 'win32' ? 'nyapassword-server.exe' : 'nyapassword-server';
 const serverBin = process.env.NPW_SERVER_BIN ?? path.resolve(root, '..', 'target', 'debug', exeName);
-const SERVER = 'http://127.0.0.1:8097';
-const FIXTURE_PORT = 5199;
+// free ports, so parallel runs (or another server on the machine) don't collide
+const freePort = () =>
+  new Promise((resolve) => {
+    const s = net.createServer().listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+const SERVER_PORT = await freePort();
+const SERVER = `http://127.0.0.1:${SERVER_PORT}`;
+const FIXTURE_PORT = await freePort();
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -42,7 +52,7 @@ async function waitFor(fn, ms = 15000, step = 100) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npw-e2e-'));
 const exe = path.join(tmp, exeName);
 fs.copyFileSync(serverBin, exe);
-const server = spawn(exe, ['--data', path.join(tmp, 'data')], { env: { ...process.env, NYAPASSWORD_LISTEN: '127.0.0.1:8097', NYAPASSWORD_LOG: 'warn' }, stdio: 'inherit' });
+const server = spawn(exe, ['--data', path.join(tmp, 'data')], { env: { ...process.env, NYAPASSWORD_LISTEN: `127.0.0.1:${SERVER_PORT}`, NYAPASSWORD_LOG: 'warn' }, stdio: 'inherit' });
 const fixture = http
   .createServer((req, res) => {
     const file = path.join(pages, path.normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^([/\\])+/, ''));
@@ -140,6 +150,53 @@ try {
   check('passkey sign-in verified by the RP', asserted.startsWith('VERIFIED'), asserted);
   const withPasskey = (await rpc('listItems', {})).find((i) => i.passkeys > 0);
   check('passkey stored in the vault', !!withPasskey, withPasskey?.title);
+
+  // ---- bank card and shipping address (not bound to a site: picked from the menu)
+  const card = await rpc('newItem', 'credit_card');
+  card.title = '招商银行信用卡';
+  const setF = (c, id, v) => (c.fields.find((f) => f.id === id).value = v);
+  setF(card, 'cardholder', 'ZHANG SAN');
+  setF(card, 'number', '6225 8800 1122 3344');
+  setF(card, 'expiry', '2028-03');
+  setF(card, 'cvv', '321');
+  await rpc('saveItem', vault, null, card);
+  const me = await rpc('newItem', 'identity');
+  me.title = '张三（家）';
+  setF(me, 'full_name', '张三');
+  setF(me, 'phone', '13800000000');
+  setF(me, 'address', { province: '广东省', city: '深圳市', district: '南山区', street: '科技园路 1 号', postal_code: '518000' });
+  await rpc('saveItem', vault, null, me);
+
+  const shop = await ctx.newPage();
+  await shop.goto(`http://127.0.0.1:${FIXTURE_PORT}/checkout.html`);
+  await shop.waitForTimeout(500);
+  const pickFromMenu = async (selector, title) => {
+    await shop.click(selector);
+    const menu = await waitFor(async () => shop.frames().find((f) => f.url().includes('/inline.html') && !f.isDetached()));
+    await menu.waitForSelector(`button.opt:has-text("${title}")`);
+    await shop.waitForTimeout(400);
+    await menu.click(`button.opt:has-text("${title}")`);
+  };
+  await pickFromMenu('#cardno', '招商银行信用卡');
+  await waitFor(async () => (await shop.inputValue('#cardno')) !== '');
+  const cardVals = await Promise.all(['#cardno', '#holder', '#mm', '#yy', '#cvv'].map((s) => shop.inputValue(s)));
+  check('bank card filled (number, holder, month / year selects, CVV)', cardVals.join('|') === '6225880011223344|ZHANG SAN|03|28|321', cardVals.join('|'));
+  await shop.waitForTimeout(3200); // right after a fill, focusing a field does not reopen the menu
+  await pickFromMenu('#consignee', '张三（家）');
+  await waitFor(async () => (await shop.inputValue('#consignee')) !== '');
+  const addrVals = await Promise.all(['#consignee', '#mobile', '#province', '#city', '#district', '#detail', '#zip'].map((s) => shop.inputValue(s)));
+  check('shipping address filled (province select, city, street)', addrVals.join('|') === '张三|13800000000|44|深圳市|南山区|科技园路 1 号|518000', addrVals.join('|'));
+
+  // ---- optional fill on page load (off by default)
+  const plain = await ctx.newPage();
+  await plain.goto(`http://127.0.0.1:${FIXTURE_PORT}/login.html`);
+  await plain.waitForTimeout(1500);
+  const untouched = (await plain.inputValue('#pwd')) === '';
+  await vaultPage.evaluate(() => chrome.storage.local.set({ autofillOnLoad: true }));
+  await plain.reload();
+  const filledOnLoad = await waitFor(async () => ((await plain.inputValue('#pwd')) === 'new-password-2' ? true : undefined), 8000).catch(() => false);
+  check('fill on page load: off by default, works when turned on', untouched && filledOnLoad);
+  await vaultPage.evaluate(() => chrome.storage.local.set({ autofillOnLoad: false }));
 
   // ---- sync reached the server
   const report = await rpc('sync');

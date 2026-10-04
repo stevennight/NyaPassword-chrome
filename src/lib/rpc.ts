@@ -18,7 +18,7 @@ export interface Context {
   host: string;
   signedIn: boolean;
   locked: boolean;
-  /** fill */
+  /** fill: 'username' | 'password' | 'otp' for logins, 'card' | 'identity' for profiles */
   fieldKind?: string;
   isNew?: boolean;
   candidates?: Candidate[];
@@ -39,6 +39,7 @@ export type ContentRequest =
   | { t: 'inline:open'; fieldKind: string; isNew: boolean }
   | { t: 'save:capture'; username: string; password: string }
   | { t: 'hello' }
+  | { t: 'autofill:load' }
   | { t: 'passkey:begin'; op: 'create' | 'get'; request: string; conditional: boolean };
 
 export type PageRequest =
@@ -54,7 +55,7 @@ export type PageRequest =
   | { t: 'popup:candidates'; url: string };
 
 export type ToContent =
-  | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string }
+  | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string; profile?: Record<string, string> }
   | { t: 'close'; n: string }
   | { t: 'passkey:result'; reqId: string; response?: unknown; error?: { name: string; message: string }; fallback?: boolean }
   | { t: 'show:prompt'; n: string };

@@ -167,6 +167,85 @@ async function credentialsFor(url: string, vaultId: string, itemId: string) {
   return { username: text('username'), password: text('password'), totp };
 }
 
+// ---------------------------------------------------------------- cards and identities
+
+const PROFILE_TEMPLATE: Record<string, string> = { card: 'credit_card', identity: 'identity' };
+const isProfile = (fieldKind?: string) => !!fieldKind && fieldKind in PROFILE_TEMPLATE;
+
+/** Card / identity items: not bound to a site, the user picks one in the menu. */
+async function profileCandidates(kind: string): Promise<Candidate[]> {
+  const b = await core();
+  if (!(await b.lockState()).unlocked) return [];
+  const list = (await b.listItems({ template: PROFILE_TEMPLATE[kind] })).filter((v) => !v.deleted && !v.archived);
+  const out: Candidate[] = [];
+  for (const v of list) {
+    let subtitle = v.subtitle;
+    if (kind === 'card') {
+      // show the last four digits so cards can be told apart
+      const number = (await b.item(v.vault_id, v.item_id)).content?.fields.find((f) => f.id === 'number')?.value;
+      const last4 = typeof number === 'string' ? number.replace(/\D/g, '').slice(-4) : '';
+      if (last4) subtitle = [v.subtitle, `•••• ${last4}`].filter(Boolean).join(' · ');
+    }
+    out.push({ vault_id: v.vault_id, item_id: v.item_id, title: v.title, username: subtitle, has_totp: false, passkeys: 0 });
+  }
+  return out;
+}
+
+const DOUBLE_SURNAMES = ['欧阳', '司马', '诸葛', '上官', '东方', '皇甫', '尉迟', '公孙', '慕容', '长孙', '宇文', '司徒', '夏侯', '轩辕', '令狐', '端木', '南宫', '西门'];
+
+/** Splits a full name into given / family names (Chinese names: surname first). */
+function splitName(full: string): { given: string; family: string } {
+  const s = full.trim();
+  if (/^[一-鿿·]{2,6}$/u.test(s)) {
+    const n = DOUBLE_SURNAMES.some((d) => s.startsWith(d)) && s.length > 2 ? 2 : 1;
+    return { family: s.slice(0, n), given: s.slice(n) };
+  }
+  const parts = s.split(/\s+/);
+  if (parts.length < 2) return { given: s, family: '' };
+  return { given: parts.slice(0, -1).join(' '), family: parts[parts.length - 1]! };
+}
+
+/** The values of a card / identity item, keyed like `ProfileKey` in forms.ts. */
+async function profileValues(kind: string, vaultId: string, itemId: string): Promise<Record<string, string>> {
+  const view = await (await core()).item(vaultId, itemId);
+  const content = view.content;
+  if (!content || content.template !== PROFILE_TEMPLATE[kind]) throw { code: 'forbidden', message: 'not a matching item' };
+  const val = (id: string) => content.fields.find((f) => f.id === id)?.value;
+  const str = (id: string) => {
+    const v = val(id);
+    return typeof v === 'string' ? v.trim() : '';
+  };
+  if (kind === 'card') {
+    const [yyyy = '', mm = ''] = str('expiry').split('-');
+    return { 'cc-name': str('cardholder'), 'cc-number': str('number').replace(/[\s-]/g, ''), 'cc-exp-month': mm.padStart(2, '0'), 'cc-exp-year': yyyy, 'cc-csc': str('cvv') };
+  }
+  const a = (val('address') ?? {}) as Record<string, string>;
+  const name = splitName(str('full_name'));
+  const parts = [a.province, a.city, a.district, a.street].map((x) => (x ?? '').trim()).filter(Boolean);
+  const cjk = parts.some((x) => /[一-鿿]/u.test(x));
+  return {
+    name: str('full_name'),
+    'given-name': name.given,
+    'family-name': name.family,
+    tel: str('phone'),
+    email: str('email'),
+    organization: str('company'),
+    street: (a.street ?? '').trim(),
+    'full-address': cjk ? parts.join('') : [...parts].reverse().join(', '),
+    province: (a.province ?? '').trim(),
+    city: (a.city ?? '').trim(),
+    district: (a.district ?? '').trim(),
+    'postal-code': (a.postal_code ?? '').trim(),
+    country: (a.country ?? '').trim(),
+  };
+}
+
+/** Card numbers only go to pages the network cannot read. */
+function secureContext(url: string): boolean {
+  const u = new URL(url);
+  return u.protocol === 'https:' || ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+}
+
 async function fillTab(tabId: number, vaultId: string, itemId: string): Promise<number> {
   const frames = (await chrome.webNavigation.getAllFrames({ tabId })) ?? [];
   let n = 0;
@@ -216,7 +295,7 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       const n = nonce();
       contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew });
       await saveContexts();
-      const count = st.unlocked ? (await candidates(url)).length : -1;
+      const count = st.unlocked ? (isProfile(msg.fieldKind) ? await profileCandidates(msg.fieldKind) : await candidates(url)).length : -1;
       return { n, count };
     }
     case 'save:capture': {
@@ -240,6 +319,16 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       // the page may navigate away right after submitting: the next page of the site shows it
       pendingPrompt.set(tabId, { n, site: site(url), expires: Date.now() + 30_000 });
       return { n };
+    }
+    case 'autofill:load': {
+      // optional (off by default): fill the only matching login when the page loads
+      const { autofillOnLoad } = await chrome.storage.local.get('autofillOnLoad');
+      if (autofillOnLoad !== true || !st.unlocked || !secureContext(url)) return false;
+      const list = await candidates(url);
+      if (list.length !== 1) return false;
+      const { username, password } = await credentialsFor(url, list[0]!.vault_id, list[0]!.item_id);
+      await chrome.tabs.sendMessage(tabId, { t: 'fill', username, password } satisfies ToContent, { frameId: sender.frameId ?? 0 });
+      return true;
     }
     case 'passkey:begin': {
       if (!st.signed_in || msg.conditional) return { fallback: true };
@@ -265,7 +354,7 @@ async function ctxView(n: string): Promise<Context> {
   const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), signedIn: st.signed_in, locked: !st.unlocked };
   if (!st.unlocked) return view;
   const vaults = (await b.vaults()).map((v) => ({ id: v.id, name: v.name }));
-  if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, candidates: await candidates(c.url) });
+  if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, candidates: isProfile(c.fieldKind) ? await profileCandidates(c.fieldKind!) : await candidates(c.url) });
   if (c.kind === 'save' && c.capture) {
     const list = await candidates(c.url);
     let updateTitle: string | undefined;
@@ -322,6 +411,12 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:fill': {
       const c = contexts.get(msg.n);
       if (!c) throw { code: 'not_found', message: 'expired' };
+      if (isProfile(c.fieldKind)) {
+        if (c.fieldKind === 'card' && !secureContext(c.url)) throw { code: 'forbidden', message: '这个页面没有加密（http），不填写银行卡' };
+        const profile = await profileValues(c.fieldKind!, msg.vault_id, msg.item_id);
+        await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, profile } satisfies ToContent, { frameId: c.frameId });
+        return true;
+      }
       const creds = await credentialsFor(c.url, msg.vault_id, msg.item_id);
       await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, ...creds } satisfies ToContent, { frameId: c.frameId });
       return true;

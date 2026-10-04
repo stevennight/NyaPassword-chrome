@@ -3,8 +3,8 @@
 // read), fills what the service worker sends, offers to save submitted
 // logins, and relays passkey requests from the page-world script.
 
-import { findForms, formOf, isVisible, type LoginForm } from '../lib/forms';
-import { setValue } from '../lib/fill';
+import { findForms, findProfiles, formOf, isVisible, profileOf, type LoginForm, type ProfileForm } from '../lib/forms';
+import { fillProfile, setValue } from '../lib/fill';
 import type { ToContent } from '../lib/rpc';
 import { send } from '../lib/rpc';
 
@@ -18,7 +18,8 @@ export default defineContentScript({
   runAt: 'document_idle',
   main(ctx) {
     let forms: LoginForm[] = [];
-    let active: HTMLInputElement | null = null;
+    let profiles: ProfileForm[] = [];
+    let active: HTMLInputElement | HTMLSelectElement | null = null;
     let signedIn = false;
     let host: HTMLDivElement | null = null;
     let shadow: ShadowRoot | null = null;
@@ -42,11 +43,19 @@ export default defineContentScript({
 
     function rescan() {
       forms = findForms(document);
+      profiles = findProfiles(document, forms);
+    }
+
+    /** A login form, unless the field is really part of a card / address form (e.g. a CVV taken for a 2FA code). */
+    function loginFormOf(el: Element): LoginForm | undefined {
+      const f = el instanceof HTMLInputElement ? formOf(el, forms) : undefined;
+      if (f && !f.username && !f.password && profileOf(el, profiles)) return undefined;
+      return f;
     }
 
     // ------------------------------------------------------------ button in the field
 
-    function placeIcon(el: HTMLInputElement) {
+    function placeIcon(el: HTMLInputElement | HTMLSelectElement) {
       const sh = ensureHost();
       if (!icon) {
         icon = document.createElement('button');
@@ -86,9 +95,10 @@ export default defineContentScript({
       for (const [n, f] of frames) if (f.kind === 'menu') closeFrame(n);
     }
 
-    async function openMenu(el: HTMLInputElement, explicit: boolean) {
-      const form = formOf(el, forms);
-      const fieldKind = form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
+    async function openMenu(el: HTMLInputElement | HTMLSelectElement, explicit: boolean) {
+      const form = loginFormOf(el);
+      const profile = form ? undefined : profileOf(el, profiles);
+      const fieldKind = profile ? profile.kind : form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
       let r: { n: string; count: number } | null;
       try {
         r = await send<{ n: string; count: number } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew });
@@ -134,7 +144,19 @@ export default defineContentScript({
     function fill(msg: Extract<ToContent, { t: 'fill' }>) {
       if (!menuTrusted(msg.n)) return;
       rescan();
-      const form = (active && formOf(active, forms)) ?? forms.find((f) => f.password && !f.isNew) ?? forms[0];
+      if (msg.profile) {
+        const p = (active && profileOf(active, profiles)) ?? profiles[0];
+        if (!p) return;
+        filling = true;
+        fillProfile(p, msg.profile);
+        filling = false;
+        filledAt = Date.now();
+        if (msg.n) closeFrame(msg.n);
+        closeMenus();
+        hideIcon();
+        return;
+      }
+      const form = (active && loginFormOf(active)) ?? forms.find((f) => f.password && !f.isNew) ?? forms[0];
       if (!form) return;
       filling = true;
       if (msg.generated) {
@@ -212,12 +234,21 @@ export default defineContentScript({
       'focusin',
       async (e) => {
         const el = e.target;
-        if (!(el instanceof HTMLInputElement) || filling) return;
+        if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement) || filling) return;
         await hello;
         if (!signedIn) return;
         rescan();
-        const form = formOf(el, forms);
-        if (!form || form.confirm === el) {
+        const form = loginFormOf(el);
+        if (!form) {
+          const profile = profileOf(el, profiles);
+          if (!profile) return hideIcon();
+          active = el;
+          placeIcon(el);
+          // a card / address form opens on its first empty field (only when something can fill it)
+          if (el instanceof HTMLInputElement && !el.value && Date.now() - filledAt > 3000) void openMenu(el, false);
+          return;
+        }
+        if (form.confirm === el || !(el instanceof HTMLInputElement)) {
           hideIcon();
           return;
         }
@@ -284,6 +315,8 @@ export default defineContentScript({
       .then((r) => {
         signedIn = !!r.signedIn || !!r.prompt;
         if (r.prompt) openPrompt(r.prompt);
+        // the service worker decides (setting off by default, exactly one match, https)
+        else if (signedIn && forms.some((f) => f.password && !f.isNew)) void send({ t: 'autofill:load' }).catch(() => {});
       })
       .catch(() => {});
   },

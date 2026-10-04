@@ -37,6 +37,9 @@
   const generate = () => send({ t: 'ctx:generate', n }).catch((e) => (error = e.message));
   const close = () => send({ t: 'ctx:cancel', n });
   const openVault = () => chrome.tabs.create({ url: chrome.runtime.getURL('/vault.html') });
+  // card / identity menus list every such item; login menus only this site's
+  const template = $derived(ctx?.fieldKind === 'card' ? 'credit_card' : ctx?.fieldKind === 'identity' ? 'identity' : 'login');
+  const emptyText = $derived(template === 'credit_card' ? '还没有保存银行卡' : template === 'identity' ? '还没有保存身份信息' : '没有保存这个网站的登录');
 </script>
 
 <svelte:window onkeydown={(e) => e.key === 'Escape' && close()} />
@@ -53,18 +56,22 @@
   {:else if ctx}
     <div class="list">
       {#each ctx.candidates ?? [] as c (c.item_id)}
-        {@const a = avatar(c.title, 'login')}
+        {@const a = avatar(c.title, template)}
         <button class="opt" onclick={() => pick(c.vault_id, c.item_id)}>
           <span class="ico" style="background:{a.color}">{a.letter}</span>
-          <span class="grow"><span class="t">{c.username || c.title}</span><span class="s">{c.title}{c.has_totp ? ' · 含验证码' : ''}</span></span>
+          {#if template === 'login'}
+            <span class="grow"><span class="t">{c.username || c.title}</span><span class="s">{c.title}{c.has_totp ? ' · 含验证码' : ''}</span></span>
+          {:else}
+            <span class="grow"><span class="t">{c.title}</span><span class="s">{c.username}</span></span>
+          {/if}
           {#if c.passkeys}<span class="badge">passkey</span>{/if}
         </button>
       {:else}
-        <div class="empty">没有保存这个网站的登录</div>
+        <div class="empty">{emptyText}</div>
       {/each}
     </div>
     <div class="foot">
-      {#if ctx.isNew || ctx.fieldKind === 'password'}<button onclick={generate}>⚿ 生成强密码</button>{/if}
+      {#if template === 'login' && (ctx.isNew || ctx.fieldKind === 'password')}<button onclick={generate}>⚿ 生成强密码</button>{/if}
       <span class="grow"></span>
       <button onclick={openVault}>打开 NyaPassword</button>
     </div>
