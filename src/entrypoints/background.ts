@@ -21,6 +21,8 @@ interface Ctx {
   capture?: { username: string; password: string };
   generated?: string;
   passkey?: { op: 'create' | 'get'; request: string; reqId: string };
+  /** host of the tab's top page when the frame belongs to another site */
+  topHost?: string;
 }
 
 let bridge: Bridge | null = null;
@@ -65,12 +67,19 @@ function nonce(): string {
   return crypto.randomUUID();
 }
 
+/** Registrable domain (public suffix list), so `a.example.com.cn` and `b.example.com.cn` are one site. */
 function site(url: string): string {
   try {
-    return npw.displayHost(url).split('.').slice(-2).join('.');
+    return npw.siteOf(url);
   } catch {
     return url;
   }
+}
+
+/** A frame of another site than the tab's top page (design doc §10.4: warn, never fill by itself). */
+function crossSite(sender: chrome.runtime.MessageSender): boolean {
+  const top = sender.tab?.url;
+  return !!top && !!sender.url && sender.frameId !== 0 && site(top) !== site(sender.url);
 }
 
 // ---------------------------------------------------------------- lock state
@@ -293,10 +302,11 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
     case 'inline:open': {
       if (!st.signed_in) return null;
       const n = nonce();
-      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew });
+      const cross = crossSite(sender);
+      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew, topHost: cross ? npw.displayHost(sender.tab!.url!) : undefined });
       await saveContexts();
       const count = st.unlocked ? (isProfile(msg.fieldKind) ? await profileCandidates(msg.fieldKind) : await candidates(url)).length : -1;
-      return { n, count };
+      return { n, count, crossSite: cross };
     }
     case 'save:capture': {
       if (!st.signed_in || !msg.password) return null;
@@ -323,7 +333,7 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
     case 'autofill:load': {
       // optional (off by default): fill the only matching login when the page loads
       const { autofillOnLoad } = await chrome.storage.local.get('autofillOnLoad');
-      if (autofillOnLoad !== true || !st.unlocked || !secureContext(url)) return false;
+      if (autofillOnLoad !== true || !st.unlocked || !secureContext(url) || crossSite(sender)) return false;
       const list = await candidates(url);
       if (list.length !== 1) return false;
       const { username, password } = await credentialsFor(url, list[0]!.vault_id, list[0]!.item_id);
@@ -351,7 +361,7 @@ async function ctxView(n: string): Promise<Context> {
   if (!c) throw { code: 'not_found', message: '这个提示已过期' };
   const b = await core();
   const st = await b.lockState();
-  const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), signedIn: st.signed_in, locked: !st.unlocked };
+  const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), topHost: c.topHost, signedIn: st.signed_in, locked: !st.unlocked };
   if (!st.unlocked) return view;
   const vaults = (await b.vaults()).map((v) => ({ id: v.id, name: v.name }));
   if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, candidates: isProfile(c.fieldKind) ? await profileCandidates(c.fieldKind!) : await candidates(c.url) });

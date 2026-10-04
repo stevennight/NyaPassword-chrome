@@ -47,6 +47,7 @@
 <div class="menu">
   <div class="h"><Logo size={14} /><span class="grow">NyaPassword · {ctx?.host ?? ''}</span><button class="x" onclick={close} aria-label="关闭">✕</button></div>
   {#if error}<div class="err">{error}</div>{/if}
+  {#if ctx?.topHost}<div class="warn">⚠ 这个登录框属于嵌入的 <b>{ctx.host}</b>，不是你正在访问的 {ctx.topHost}。确认可信再填写。</div>{/if}
   {#if ctx && ctx.locked}
     <form class="unlock" onsubmit={unlock}>
       <!-- svelte-ignore a11y_autofocus -->
@@ -96,5 +97,6 @@
   .unlock { display: flex; gap: 6px; padding: 10px; }
   .unlock input { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface-2); min-width: 0; }
   .unlock button { border: 0; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 0 14px; font-weight: 600; }
+  .warn { font-size: 12px; background: var(--warn-bg, #fff4e0); color: var(--warn, #8a5300); border-radius: 8px; margin: 0 8px 6px; padding: 6px 8px; line-height: 1.4; }
   .err { color: var(--bad); font-size: 12.5px; padding: 0 10px 6px; }
 </style>

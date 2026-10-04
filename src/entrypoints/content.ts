@@ -99,13 +99,14 @@ export default defineContentScript({
       const form = loginFormOf(el);
       const profile = form ? undefined : profileOf(el, profiles);
       const fieldKind = profile ? profile.kind : form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
-      let r: { n: string; count: number } | null;
+      let r: { n: string; count: number; crossSite?: boolean } | null;
       try {
-        r = await send<{ n: string; count: number } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew });
+        r = await send<{ n: string; count: number; crossSite?: boolean } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew });
       } catch {
         return;
       }
-      if (!r || (!explicit && r.count === 0 && !form?.isNew)) return;
+      // in a frame of another site the menu only opens when the user asks for it
+      if (!r || (!explicit && ((r.count === 0 && !form?.isNew) || r.crossSite))) return;
       closeMenus();
       const rect = el.getBoundingClientRect();
       const f = document.createElement('iframe');

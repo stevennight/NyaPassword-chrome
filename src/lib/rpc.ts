@@ -16,6 +16,8 @@ export interface Context {
   kind: 'fill' | 'save' | 'passkey';
   origin: string;
   host: string;
+  /** set when the field is in a frame of another site than the page the user sees */
+  topHost?: string;
   signedIn: boolean;
   locked: boolean;
   /** fill: 'username' | 'password' | 'otp' for logins, 'card' | 'identity' for profiles */

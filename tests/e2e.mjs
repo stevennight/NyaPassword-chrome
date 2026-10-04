@@ -198,6 +198,21 @@ try {
   check('fill on page load: off by default, works when turned on', untouched && filledOnLoad);
   await vaultPage.evaluate(() => chrome.storage.local.set({ autofillOnLoad: false }));
 
+  // ---- a login form of another site embedded in the page: no automatic menu, a warning when asked
+  const framed = await ctx.newPage();
+  await framed.goto(`http://localhost:${FIXTURE_PORT}/framed.html?src=${encodeURIComponent(`http://127.0.0.1:${FIXTURE_PORT}/login.html`)}`);
+  const inner = await waitFor(async () => framed.frames().find((f) => f.url().includes('/login.html')));
+  await inner.waitForSelector('#account');
+  await framed.waitForTimeout(800);
+  await inner.click('#account');
+  await framed.waitForTimeout(1500);
+  const autoOpened = framed.frames().some((f) => f.url().includes('/inline.html'));
+  const box = await (await inner.$('#account')).boundingBox();
+  await framed.mouse.click(box.x + box.width - 15, box.y + box.height / 2); // the NyaPassword button in the field
+  const warnMenu = await waitFor(async () => framed.frames().find((f) => f.url().includes('/inline.html') && !f.isDetached()), 8000).catch(() => null);
+  const warned = warnMenu ? await warnMenu.waitForSelector('.warn', { timeout: 5000 }).then(() => true).catch(() => false) : false;
+  check('cross-site frame: menu not opened by itself, warning when opened', !autoOpened && warned, `auto=${autoOpened} menu=${!!warnMenu} warned=${warned}`);
+
   // ---- sync reached the server
   const report = await rpc('sync');
   const dev = await rpc('devices');
