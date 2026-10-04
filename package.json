@@ -1,0 +1,29 @@
+{
+  "name": "nyapassword-chrome",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "NyaPassword browser extension for Chrome and Edge (Manifest V3)",
+  "scripts": {
+    "wasm": "npm --prefix ../common/web run wasm",
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/chrome": "^0.3.4",
+    "@wxt-dev/module-svelte": "^2.0.5",
+    "jsdom": "^26.0.0",
+    "playwright": "^1.63.0",
+    "qrcode-generator": "^2.0.4",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3",
+    "wxt": "^0.21.4"
+  }
+}

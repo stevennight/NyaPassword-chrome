@@ -1,0 +1,158 @@
+// End-to-end test of the built extension (.output/chrome-mv3) in Chromium:
+// a fresh NyaPassword server, an account created through the extension,
+// autofill through the inline menu, the save/update prompt, and a passkey
+// registered and used on a test relying party (signature verified by the page).
+//
+//   npm run build && node tests/e2e.mjs
+//   NPW_SERVER_BIN=<path to nyapassword-server> to use another server build.
+
+import { chromium } from 'playwright';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, '..');
+const ext = path.join(root, '.output', 'chrome-mv3');
+const pages = path.resolve(root, '..', 'common', 'autofill', 'pages');
+const exeName = process.platform === 'win32' ? 'nyapassword-server.exe' : 'nyapassword-server';
+const serverBin = process.env.NPW_SERVER_BIN ?? path.resolve(root, '..', 'target', 'debug', exeName);
+const SERVER = 'http://127.0.0.1:8097';
+const FIXTURE_PORT = 5199;
+
+const results = [];
+function check(name, ok, detail = '') {
+  results.push({ name, ok });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+async function waitFor(fn, ms = 15000, step = 100) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn().catch(() => undefined);
+    if (v) return v;
+    if (Date.now() > end) throw new Error('timed out');
+    await new Promise((r) => setTimeout(r, step));
+  }
+}
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'npw-e2e-'));
+const exe = path.join(tmp, exeName);
+fs.copyFileSync(serverBin, exe);
+const server = spawn(exe, ['--data', path.join(tmp, 'data')], { env: { ...process.env, NYAPASSWORD_LISTEN: '127.0.0.1:8097', NYAPASSWORD_LOG: 'warn' }, stdio: 'inherit' });
+const fixture = http
+  .createServer((req, res) => {
+    const file = path.join(pages, path.normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^([/\\])+/, ''));
+    if (!file.startsWith(pages) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return res.writeHead(404).end();
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fs.readFileSync(file));
+  })
+  .listen(FIXTURE_PORT, '127.0.0.1');
+
+let ctx;
+try {
+  await waitFor(() => fetch(`${SERVER}/v1/health`).then((r) => r.ok));
+  ctx = await chromium.launchPersistentContext(path.join(tmp, 'profile'), {
+    channel: 'chromium',
+    headless: true,
+    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
+  });
+  const sw = ctx.serviceWorkers()[0] ?? (await ctx.waitForEvent('serviceworker'));
+  const id = new URL(sw.url()).host;
+  if (process.env.NPW_E2E_DEBUG) sw.on('console', (m) => console.log('[sw]', m.type(), m.text()));
+
+  // ---- account through the extension (the vault page talks to the service worker)
+  const vaultPage = await ctx.newPage();
+  await vaultPage.goto(`chrome-extension://${id}/vault.html`);
+  const rpc = async (m, ...a) => {
+    const r = await vaultPage.evaluate(([m, a]) => chrome.runtime.sendMessage({ t: 'call', m, a }), [m, a]);
+    if (!r?.ok) throw new Error(`${m}: ${r?.e?.message}`);
+    return r.v;
+  };
+  // headless Chromium reports the screen as locked; the extension would lock right away
+  await vaultPage.evaluate(() => chrome.storage.local.set({ lockOnScreenLock: false }));
+  const kit = await rpc('register', SERVER, 'e2e@example.com', 'e2e test password 2026', null);
+  check('register through the extension', /^A1-/.test(kit.secret_key));
+  const vault = (await rpc('vaults'))[0].id;
+  const item = await rpc('newItem', 'login');
+  item.title = 'Fixture site';
+  item.fields.find((f) => f.id === 'username').value = 'alice@example.com';
+  item.fields.find((f) => f.id === 'password').value = 'old-password-1';
+  item.fields.find((f) => f.id === 'otp').value = 'JBSWY3DPEHPK3PXP';
+  item.urls = [{ id: 'u1', url: `http://127.0.0.1:${FIXTURE_PORT}`, match: 'domain' }];
+  const itemId = await rpc('saveItem', vault, null, item);
+
+  // ---- autofill through the inline menu
+  const site = await ctx.newPage();
+  if (process.env.NPW_E2E_DEBUG) {
+    site.on('console', (m) => console.log('[page]', m.type(), m.text()));
+  }
+  await site.goto(`http://127.0.0.1:${FIXTURE_PORT}/login.html`);
+  await site.waitForTimeout(500);
+  await site.click('#account');
+  const inline = await waitFor(async () => site.frames().find((f) => f.url().includes('/inline.html'))).catch(async (e) => {
+    console.log('frames:', site.frames().map((f) => f.url()));
+    console.log('sw errors:', await sw.evaluate(() => String(globalThis.__npwErrors ?? 'none')).catch((x) => String(x)));
+    throw e;
+  });
+  await inline.waitForSelector('button.opt');
+  await site.waitForTimeout(400); // the menu ignores clicks right after it opens (anti-clickjacking)
+  await inline.click('button.opt');
+  await waitFor(async () => (await site.inputValue('#pwd')) === 'old-password-1');
+  check('inline menu fills username and password', (await site.inputValue('#account')) === 'alice@example.com' && (await site.inputValue('#pwd')) === 'old-password-1');
+  check('one-time code filled into the 2FA field', /^\d{6}$/.test(await site.inputValue('#code')));
+
+  // ---- a changed password is offered as an update
+  await site.fill('#pwd', 'new-password-2');
+  await site.click('#go');
+  const prompt = await waitFor(async () => site.frames().find((f) => f.url().includes('/prompt.html')));
+  await prompt.waitForSelector('text=更新');
+  await prompt.click('button.primary');
+  const updated = await waitFor(async () => {
+    const v = await rpc('item', vault, itemId);
+    return v.content.fields.find((f) => f.id === 'password').value === 'new-password-2' ? v : undefined;
+  });
+  check('save prompt updates the password', !!updated);
+  check('old password kept in history', updated.content.history?.some((h) => h.value === 'old-password-1'));
+
+  // ---- passkeys
+  const rp = await ctx.newPage();
+  await rp.goto(`http://localhost:${FIXTURE_PORT}/passkey.html`);
+  await rp.click('#create');
+  const p1 = await waitFor(async () => rp.frames().find((f) => f.url().includes('/prompt.html')));
+  await p1.waitForSelector('text=保存通行密钥');
+  await p1.click('button.primary');
+  const created = await waitFor(async () => {
+    const t = await rp.textContent('#out');
+    return t && t.length ? t : undefined;
+  });
+  check('passkey registered on the RP', created.startsWith('created:') && created.includes('alg:-7'), created);
+  await rp.click('#get');
+  const p2 = await waitFor(async () => rp.frames().find((f) => f.url().includes('/prompt.html') && !f.isDetached()));
+  await p2.waitForSelector('button.opt');
+  await p2.click('button.opt');
+  const asserted = await waitFor(async () => {
+    const t = await rp.textContent('#out');
+    return t && !t.startsWith('created:') ? t : undefined;
+  });
+  check('passkey sign-in verified by the RP', asserted.startsWith('VERIFIED'), asserted);
+  const withPasskey = (await rpc('listItems', {})).find((i) => i.passkeys > 0);
+  check('passkey stored in the vault', !!withPasskey, withPasskey?.title);
+
+  // ---- sync reached the server
+  const report = await rpc('sync');
+  const dev = await rpc('devices');
+  check('synced with the server', report && dev.length === 1);
+} catch (e) {
+  check('e2e run', false, String(e?.stack ?? e));
+} finally {
+  await ctx?.close().catch(() => {});
+  server.kill();
+  fixture.close();
+}
+
+const failed = results.filter((r) => !r.ok).length;
+console.log(`\n${results.length - failed}/${results.length} passed`);
+process.exit(failed ? 1 : 0);

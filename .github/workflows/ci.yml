@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Same layout as locally: chrome/, common/ (the core and shared UI) and
+# server/ (for the end-to-end test) side by side.
+jobs:
+  build-test:
+    name: Build, unit tests, end-to-end test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out chrome
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: chrome
+          persist-credentials: false
+
+      - name: Check out common
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ github.repository_owner }}/NyaPassword-common
+          # read-only deploy key of the (private) common repository
+          ssh-key: ${{ secrets.COMMON_DEPLOY_KEY }}
+          path: common
+          persist-credentials: false
+
+      - name: Check out server (end-to-end test)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ github.repository_owner }}/NyaPassword-server
+          # read-only deploy key of the (private) server repository
+          ssh-key: ${{ secrets.SERVER_DEPLOY_KEY }}
+          path: server
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Set up Rust and wasm-bindgen
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+          rustup target add wasm32-unknown-unknown
+          v="$(grep -A1 '^name = "wasm-bindgen"$' common/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: common -> ../target
+
+      - name: Build the core (WebAssembly)
+        working-directory: common/web
+        run: npm ci --no-audit --no-fund && npm run wasm
+
+      - name: Check, test and build
+        working-directory: chrome
+        run: |
+          npm ci --no-audit --no-fund
+          npm run check
+          npm test
+          npm run build
+
+      - name: End-to-end test (Chromium + a fresh server)
+        run: |
+          (cd server && cargo build)
+          cd chrome
+          npx playwright install --with-deps chromium
+          node tests/e2e.mjs
+
+      - name: Upload the unpacked extension
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nyapassword-chrome-${{ github.sha }}
+          path: chrome/.output/chrome-mv3
+          if-no-files-found: error
+          retention-days: 14

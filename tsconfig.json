@@ -1,0 +1,14 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "types": ["chrome", "svelte"],
+    "paths": {
+      "$lib/*": ["../common/web/src/lib/*"],
+      "$components/*": ["../common/web/src/components/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", ".wxt/wxt.d.ts", "../common/web/src/env.d.ts"]
+}
