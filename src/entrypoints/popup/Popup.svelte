@@ -30,6 +30,8 @@
   let desk = $state<DesktopStatus | null>(null);
   let deskBusy = $state(false);
   let deskMsg = $state('');
+  /** An interactive request has been waiting a moment: say where to unlock. */
+  let deskWaiting = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   // "使用前需要验证" items: the master password before filling / copying a secret
   let verifying = $state<{ it: ItemView; action: 'fill' | 'password' | 'totp' } | null>(null);
@@ -49,17 +51,26 @@
 
   const deskStatus = () => send<DesktopStatus>({ t: 'desktop:status' }).catch(() => null);
 
+  /**
+   * Opening the popup is an explicit action: a locked desktop app shows its
+   * own unlock screen (one not running is started) and the extension unlocks
+   * when it does. The master password field stays usable meanwhile.
+   */
   async function unlockWithDesktop() {
     desk = await deskStatus();
     if (!desk?.enabled || !desk.paired) return;
     deskBusy = true;
     deskMsg = '';
+    // an unlocked desktop app answers at once: no message for that
+    const shown = setTimeout(() => (deskWaiting = true), 400);
     try {
-      if (await send<boolean>({ t: 'desktop:unlock' })) await refresh();
+      if (await send<boolean>({ t: 'desktop:unlock', interactive: true })) await refresh();
     } catch (err) {
       const x = err as { code: string; message: string };
-      deskMsg = x.code === 'locked' ? '桌面端已锁定：先解锁桌面端，或在这里输入主密码' : `桌面端解锁不可用：${x.message}`;
+      deskMsg = `桌面端没有解锁：${x.message}。也可以在这里输入主密码`;
     } finally {
+      clearTimeout(shown);
+      deskWaiting = false;
       deskBusy = false;
     }
   }
@@ -231,7 +242,7 @@
         {/each}
       {/if}
       <label class="opt"><input type="checkbox" checked={desk?.enabled ?? false} onchange={toggleDesktop} />
-        <span>由桌面端解锁<span class="faint small">NyaPassword 桌面端已解锁时，扩展无需主密码即可解锁；桌面端锁定时扩展也锁定</span></span></label>
+        <span>由桌面端解锁<span class="faint small">打开弹窗或点输入框里的 NyaPassword 按钮时，由桌面端解锁扩展（桌面端锁定时会弹出它的解锁窗口）；桌面端锁定时扩展也锁定</span></span></label>
       {#if desk?.enabled}
         <div class="desk small">
           <div class="row"><span class="faint">扩展 ID</span><span class="mono grow id">{desk.extensionId}</span>
@@ -270,7 +281,11 @@
       <button class="btn primary wide" disabled={busy || !password}>{busy ? '解锁中…' : '解锁'}</button>
       {#if error}<div class="banner bad small">{error}</div>{/if}
       {#if desk?.enabled && desk.paired}
-        <button type="button" class="btn ghost sm" disabled={deskBusy} onclick={unlockWithDesktop}>{deskBusy ? '正在通过桌面端解锁…' : '用桌面端解锁'}</button>
+        {#if deskWaiting}
+          <div class="banner small wait">请在 NyaPassword 桌面端完成解锁<span class="faint">（主密码、Windows Hello 或 PIN）；也可以在上面输入主密码</span></div>
+        {:else if !deskBusy}
+          <button type="button" class="btn ghost sm" onclick={unlockWithDesktop}>用桌面端解锁</button>
+        {/if}
         {#if deskMsg}<div class="faint small">{deskMsg}</div>{/if}
       {/if}
     </form>
@@ -339,6 +354,7 @@
   header { gap: 6px; }
   .center { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 24px 8px; text-align: center; }
   .wide { width: 100%; justify-content: center; }
+  .wait { display: flex; flex-direction: column; gap: 2px; text-align: left; width: 100%; }
   .grp { font-size: 11.5px; color: var(--text-3); font-weight: 600; padding-top: 4px; }
   .it { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 8px; }
   .it:hover { background: var(--surface-2); }

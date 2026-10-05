@@ -65,7 +65,8 @@ export default defineContentScript({
         icon.addEventListener('mousedown', (e) => e.preventDefault());
         icon.addEventListener('click', (e) => {
           e.preventDefault();
-          if (active) void openMenu(active, true);
+          // only a real click counts as the user asking (it may bring the desktop app forward)
+          if (active && e.isTrusted) void openMenu(active, true);
         });
         sh.appendChild(icon);
       }
@@ -101,7 +102,7 @@ export default defineContentScript({
       const fieldKind = profile ? profile.kind : form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
       let r: { n: string; count: number; crossSite?: boolean } | null;
       try {
-        r = await send<{ n: string; count: number; crossSite?: boolean } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew });
+        r = await send<{ n: string; count: number; crossSite?: boolean } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew, explicit });
       } catch {
         return;
       }

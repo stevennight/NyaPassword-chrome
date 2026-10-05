@@ -22,6 +22,8 @@ export interface Context {
   topHost?: string;
   signedIn: boolean;
   locked: boolean;
+  /** Locked and paired with the desktop app: whether it is being asked to unlock (`ctx:desktop`). */
+  desktop?: { waiting: boolean; error: string };
   /** fill: 'username' | 'password' | 'otp' for logins, 'card' | 'identity' for profiles */
   fieldKind?: string;
   isNew?: boolean;
@@ -40,7 +42,8 @@ export interface Context {
 }
 
 export type ContentRequest =
-  | { t: 'inline:open'; fieldKind: string; isNew: boolean }
+  /** `explicit`: the user clicked the NyaPassword button (may ask the desktop app to unlock). */
+  | { t: 'inline:open'; fieldKind: string; isNew: boolean; explicit?: boolean }
   | { t: 'save:capture'; username: string; password: string }
   | { t: 'hello' }
   | { t: 'autofill:load' }
@@ -50,6 +53,8 @@ export type PageRequest =
   | { t: 'call'; m: string; a: unknown[] }
   | { t: 'ctx:get'; n: string }
   | { t: 'ctx:unlock'; n: string; password: string }
+  /** The menu's "用桌面端解锁": an interactive request to the desktop app. */
+  | { t: 'ctx:desktop'; n: string }
   | { t: 'ctx:verify'; n: string; vault_id: string; item_id: string; password: string }
   | { t: 'ctx:fill'; n: string; vault_id: string; item_id: string }
   | { t: 'ctx:generate'; n: string }
@@ -61,7 +66,8 @@ export type PageRequest =
   | { t: 'popup:verify'; vault_id: string; item_id: string; password: string }
   | { t: 'popup:secret'; vault_id: string; item_id: string; what: 'username' | 'password' | 'totp' }
   | { t: 'desktop:status' }
-  | { t: 'desktop:unlock' }
+  /** `interactive`: the user asked (the popup opened): a locked desktop app shows its unlock screen. */
+  | { t: 'desktop:unlock'; interactive?: boolean }
   | { t: 'desktop:pair' }
   | { t: 'desktop:unpair' }
   | { t: 'desktop:disconnect' };
@@ -77,6 +83,10 @@ export interface DesktopStatus {
   desktopUnlocked: boolean | null;
   pairing: { code: string; state: 'pairing' | 'paired' | 'error'; error: string } | null;
   error: string;
+  /** An interactive request waits for the user to unlock the desktop app. */
+  waiting?: boolean;
+  /** Why the last interactive request failed. */
+  waitError?: string;
 }
 
 export type ToContent =

@@ -13,10 +13,32 @@
   let verifying = $state<Candidate | null>(null);
   let vpw = $state('');
 
-  onMount(load);
+  let poll: ReturnType<typeof setTimeout> | undefined;
+
+  onMount(() => {
+    void load();
+    return () => clearTimeout(poll);
+  });
+
   async function load() {
     try {
-      ctx = await send<Context>({ t: 'ctx:get', n });
+      show(await send<Context>({ t: 'ctx:get', n }));
+    } catch (e) {
+      error = (e as { message: string }).message;
+    }
+  }
+
+  /** While the desktop app is being asked to unlock, look again now and then. */
+  function show(view: Context) {
+    ctx = view;
+    clearTimeout(poll);
+    if (view.locked && view.desktop?.waiting) poll = setTimeout(() => void load(), 1500);
+  }
+
+  async function askDesktop() {
+    error = '';
+    try {
+      show(await send<Context>({ t: 'ctx:desktop', n }));
     } catch (e) {
       error = (e as { message: string }).message;
     }
@@ -27,7 +49,7 @@
     busy = true;
     error = '';
     try {
-      ctx = await send<Context>({ t: 'ctx:unlock', n, password });
+      show(await send<Context>({ t: 'ctx:unlock', n, password }));
       password = '';
     } catch (err) {
       error = (err as { code: string }).code === 'wrong_password' ? '主密码不正确' : (err as { message: string }).message;
@@ -78,11 +100,19 @@
   {#if error}<div class="err">{error}</div>{/if}
   {#if ctx?.topHost}<div class="warn">⚠ 这个登录框属于嵌入的 <b>{ctx.host}</b>，不是你正在访问的 {ctx.topHost}。确认可信再填写。</div>{/if}
   {#if ctx && ctx.locked}
+    {#if ctx.desktop?.waiting}
+      <div class="desk">请在 NyaPassword 桌面端完成解锁…<span class="faint">也可以在下面输入主密码</span></div>
+    {:else if ctx.desktop?.error}
+      <div class="desk">桌面端没有解锁：{ctx.desktop.error}</div>
+    {/if}
     <form class="unlock" onsubmit={unlock}>
       <!-- svelte-ignore a11y_autofocus -->
       <input type="password" bind:value={password} placeholder="主密码解锁" autofocus />
       <button disabled={busy || !password}>{busy ? '…' : '解锁'}</button>
     </form>
+    {#if ctx.desktop && !ctx.desktop.waiting}
+      <div class="foot"><span class="grow"></span><button onclick={askDesktop}>用桌面端解锁</button></div>
+    {/if}
   {:else if ctx && verifying}
     <form class="verify" onsubmit={verifyAndFill}>
       <div class="vt">🔒 <b>{verifying.title}</b> 需要验证</div>
@@ -140,6 +170,8 @@
   .unlock button { border: 0; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 0 14px; font-weight: 600; }
   .warn { font-size: 12px; background: var(--warn-bg, #fff4e0); color: var(--warn, #8a5300); border-radius: 8px; margin: 0 8px 6px; padding: 6px 8px; line-height: 1.4; }
   .err { color: var(--bad); font-size: 12.5px; padding: 0 10px 6px; }
+  .desk { font-size: 12.5px; padding: 4px 10px 0; display: flex; flex-direction: column; gap: 2px; }
+  .faint { color: var(--text-3); font-size: 11.5px; }
   .lock { font-size: 11px; opacity: .7; }
   .verify { display: flex; flex-direction: column; gap: 4px; padding: 4px 6px; }
   .verify .unlock { padding: 6px 4px; }

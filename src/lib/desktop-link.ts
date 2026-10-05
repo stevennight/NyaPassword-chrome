@@ -7,7 +7,11 @@
 // (ephemeral ECDH + HKDF-SHA256 + AES-256-GCM, bound to the account and a
 // fresh nonce); the service worker opens it and calls `unlockWithKey`, which
 // checks the key against the account itself. When the desktop app locks, it
-// tells connected extensions to lock.
+// tells connected extensions to lock. While it is locked, an *interactive*
+// request (the user opened the popup / clicked in the menu) makes it show its
+// own unlock screen and answer once unlocked (desktop-unlock.ts).
+
+import { INTERACTIVE_TIMEOUT_MS } from './desktop-unlock';
 
 export const HOST_NAME = 'app.nya.password';
 const UNLOCK_INFO = 'npw/browser-bridge/unlock/v1';
@@ -200,10 +204,16 @@ export class DesktopPort {
   }
 }
 
-/** Asks the desktop app for the account key and opens it. */
-export async function requestAccountKey(port: DesktopPort, pairing: Pairing): Promise<Uint8Array> {
+/**
+ * Asks the desktop app for the account key and opens it. `interactive`: the
+ * user asked (see desktop-unlock.ts); a locked desktop app then shows its
+ * unlock screen and answers once unlocked, so the request waits long.
+ */
+export async function requestAccountKey(port: DesktopPort, pairing: Pairing, interactive = false): Promise<Uint8Array> {
   const nonce = crypto.getRandomValues(new Uint8Array(32));
-  const r = await port.request({ type: 'unlock', pairing_id: pairing.id, account_id: pairing.accountId, server_url: pairing.serverUrl, nonce: b64(nonce) });
+  const msg: Record<string, unknown> = { type: 'unlock', pairing_id: pairing.id, account_id: pairing.accountId, server_url: pairing.serverUrl, nonce: b64(nonce) };
+  if (interactive) msg.interactive = true;
+  const r = await port.request(msg, interactive ? INTERACTIVE_TIMEOUT_MS : 10_000);
   if (r.type !== 'unlock') throw { code: r.code ?? 'invalid', message: r.message ?? 'unexpected reply' };
   return openSealed(pairing.privateKey, pairing.publicKey, pairing.accountId, nonce, r as unknown as Sealed);
 }

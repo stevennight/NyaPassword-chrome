@@ -14,6 +14,7 @@ import * as npw from '../../../common/web/src/wasm/pkg/npw.js';
 import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, ToContent } from '../lib/rpc';
 import { b64, unb64 } from '../lib/rpc';
 import { clearPairing, DesktopPort, generatePairingKey, HOST_NAME, loadPairing, pairingCode, rawPublicKey, requestAccountKey, savePairing, type Pairing } from '../lib/desktop-link';
+import { DesktopUnlocker } from '../lib/desktop-unlock';
 import { consume, grant, loadTarget, saveOffer, shortcutTarget, type Verifiable } from '../lib/reprompt';
 
 interface Ctx extends Verifiable {
@@ -30,6 +31,10 @@ interface Ctx extends Verifiable {
   passkey?: { op: 'create' | 'get'; request: string; reqId: string };
   /** host of the tab's top page when the frame belongs to another site */
   topHost?: string;
+  /** the user clicked the NyaPassword button (the menu may ask the desktop app to unlock) */
+  explicit?: boolean;
+  /** this menu already asked the desktop app */
+  desktopAsked?: boolean;
 }
 
 let bridge: Bridge | null = null;
@@ -169,25 +174,30 @@ async function desktopEnabled(): Promise<boolean> {
 async function onDesktopEvent(type: string) {
   const st = await (await core()).lockState();
   if (type === 'locked' && st.unlocked) await doLock('desktop app locked');
-  if (type === 'unlocked' && !st.unlocked) await desktopUnlock().catch(() => {});
+  if (type === 'unlocked' && !st.unlocked) await unlocker.unlock(false).catch(() => {});
 }
 
-/** Unlocks with the desktop app when it is paired and unlocked; whether it did. */
-async function desktopUnlock(): Promise<boolean> {
+/**
+ * Unlocking through the desktop app (src/lib/desktop-unlock.ts): automatic
+ * attempts only use an unlocked desktop app; interactive ones (popup opened,
+ * NyaPassword button clicked) make a locked one show its unlock screen.
+ */
+const unlocker = new DesktopUnlocker<Pairing>({
+  enabled: desktopEnabled,
+  lockState: async () => (await core()).lockState(),
+  pairing: () => loadPairing(),
+  requestKey: (p, interactive) => requestAccountKey(desktop, p, interactive),
+  unlockWithKey: async (key) => {
+    wasmClient().unlockWithKey(key);
+    await onUnlocked();
+  },
+});
+
+/** Locked, and the desktop app could unlock us (setting on, paired for this account). */
+async function desktopPaired(accountId: string): Promise<boolean> {
   if (!(await desktopEnabled())) return false;
-  const st = await (await core()).lockState();
-  if (!st.signed_in) return false;
-  if (st.unlocked) return true;
-  const p = await loadPairing();
-  if (!p?.paired || p.accountId !== st.account_id) return false;
-  const ak = await requestAccountKey(desktop, p);
-  try {
-    wasmClient().unlockWithKey(ak);
-  } finally {
-    ak.fill(0);
-  }
-  await onUnlocked();
-  return true;
+  const p = await loadPairing().catch(() => null);
+  return !!p?.paired && p.accountId === accountId;
 }
 
 async function desktopPair(): Promise<{ code: string }> {
@@ -208,7 +218,7 @@ async function desktopPair(): Promise<{ code: string }> {
       if (r.type === 'paired') {
         await savePairing({ ...pairing, paired: true });
         pairState = { code, state: 'paired', error: '' };
-        await desktopUnlock().catch(() => {});
+        await unlocker.unlock(false).catch(() => {});
       } else {
         pairState = { code, state: 'error', error: String(r.message ?? r.code) };
       }
@@ -224,7 +234,17 @@ async function desktopStatus(): Promise<DesktopStatus> {
     const r = await desktop.request({ type: 'hello' }, 3000);
     if (r.type === 'hello') desktopUnlocked = r.unlocked === true;
   }
-  return { enabled, extensionId: chrome.runtime.id, paired: !!p?.paired, connected: desktop.connected, desktopUnlocked, pairing: pairState, error: desktopUnlocked === null ? desktop.lastError : '' };
+  return {
+    enabled,
+    extensionId: chrome.runtime.id,
+    paired: !!p?.paired,
+    connected: desktop.connected,
+    desktopUnlocked,
+    pairing: pairState,
+    error: desktopUnlocked === null ? desktop.lastError : '',
+    waiting: unlocker.waiting,
+    waitError: unlocker.error,
+  };
 }
 
 async function desktopUnpair() {
@@ -425,7 +445,7 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       if (!st.signed_in) return null;
       const n = nonce();
       const cross = crossSite(sender);
-      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew, topHost: cross ? npw.displayHost(sender.tab!.url!) : undefined });
+      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew, topHost: cross ? npw.displayHost(sender.tab!.url!) : undefined, explicit: msg.explicit === true });
       await saveContexts();
       const count = st.unlocked ? (isProfile(msg.fieldKind) ? await profileCandidates(msg.fieldKind) : await candidates(url)).length : -1;
       return { n, count, crossSite: cross };
@@ -484,9 +504,22 @@ async function ctxView(n: string): Promise<Context> {
   const b = await core();
   let st = await b.lockState();
   // locked: an unlocked desktop app can unlock us without the master password
-  if (st.signed_in && !st.unlocked && (await desktopUnlock().catch(() => false))) st = await b.lockState();
+  // (not while an interactive request waits: that one answers by itself)
+  if (st.signed_in && !st.unlocked && !unlocker.waiting && (await unlocker.unlock(false).catch(() => false))) st = await b.lockState();
   const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), topHost: c.topHost, signedIn: st.signed_in, locked: !st.unlocked };
-  if (!st.unlocked) return view;
+  if (!st.unlocked) {
+    if (st.signed_in && (await desktopPaired(st.account_id))) {
+      // the user clicked the NyaPassword button: ask the desktop app (once per menu);
+      // a menu that opened by itself never brings the desktop app forward
+      if (c.explicit && !c.desktopAsked && !unlocker.waiting) {
+        c.desktopAsked = true;
+        await saveContexts();
+        void unlocker.unlock(true);
+      }
+      view.desktop = { waiting: unlocker.waiting, error: unlocker.error };
+    }
+    return view;
+  }
   const vaults = (await b.vaults()).map((v) => ({ id: v.id, name: v.name }));
   if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, candidates: isProfile(c.fieldKind) ? await profileCandidates(c.fieldKind!) : await candidates(c.url) });
   if (c.kind === 'save' && c.capture) {
@@ -541,6 +574,12 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:unlock': {
       await b.unlock(msg.password);
       await onUnlocked();
+      return ctxView(msg.n);
+    }
+    case 'ctx:desktop': {
+      // the menu's explicit "用桌面端解锁"
+      if (!contexts.has(msg.n)) throw { code: 'not_found', message: 'expired' };
+      void unlocker.unlock(true);
       return ctxView(msg.n);
     }
     case 'ctx:verify': {
@@ -658,10 +697,15 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     }
     case 'desktop:status':
       return desktopStatus();
-    case 'desktop:unlock':
-      return desktopUnlock().catch((e) => {
+    case 'desktop:unlock': {
+      // interactive: the popup was opened (a locked desktop app shows its unlock screen)
+      const interactive = msg.interactive === true;
+      const ok = await unlocker.unlock(interactive).catch((e) => {
         throw { code: e?.code ?? 'invalid', message: e?.message ?? String(e) };
       });
+      if (!ok && interactive && unlocker.error) throw { code: 'desktop', message: unlocker.error };
+      return ok;
+    }
     case 'desktop:pair':
       return desktopPair();
     case 'desktop:unpair':
