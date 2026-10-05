@@ -10,6 +10,9 @@
   let busy = $state(false);
   let vaultId = $state('');
   let target = $state(''); // passkey create: '' = new item, else "vault|item"
+  /** A passkey of a "使用前需要验证" item: the master password first. */
+  let verifying = $state<{ vault_id: string; item_id: string; passkey_id: string; title: string; user_name: string } | null>(null);
+  let vpw = $state('');
 
   onMount(load);
   async function load() {
@@ -54,7 +57,32 @@
     const t = tv && ti ? { vault_id: tv, item_id: ti } : undefined;
     return act(send({ t: 'ctx:passkey', n, choice: { create: true, vault_id: vaultId, target: t } }));
   }
-  const usePasskey = (v: string, i: string, p: string) => act(send({ t: 'ctx:passkey', n, choice: { vault_id: v, item_id: i, passkey_id: p } }));
+  function usePasskey(p: NonNullable<Context['passkeys']>[number]) {
+    error = '';
+    if (p.reprompt) {
+      verifying = p;
+      vpw = '';
+      return;
+    }
+    return act(send({ t: 'ctx:passkey', n, choice: { vault_id: p.vault_id, item_id: p.item_id, passkey_id: p.passkey_id } }));
+  }
+
+  /** The service worker checks the password, then signs with this passkey once. */
+  async function verifyAndUse(e: Event) {
+    e.preventDefault();
+    if (!verifying || busy) return;
+    const p = verifying;
+    busy = true;
+    error = '';
+    try {
+      await send({ t: 'ctx:verify', n, vault_id: p.vault_id, item_id: p.item_id, password: vpw });
+      vpw = '';
+      await send({ t: 'ctx:passkey', n, choice: { vault_id: p.vault_id, item_id: p.item_id, passkey_id: p.passkey_id } });
+    } catch (err) {
+      error = (err as { code: string }).code === 'wrong_password' ? '主密码不正确' : (err as { message: string }).message;
+      busy = false;
+    }
+  }
 </script>
 
 <div class="box">
@@ -98,11 +126,24 @@
       <button class="btn" onclick={() => cancel()}>取消</button>
       <button class="btn primary" disabled={busy} onclick={createPasskey}>保存</button>
     </div>
+  {:else if ctx?.kind === 'passkey' && verifying}
+    <h3>使用通行密钥登录 {ctx.rpId}</h3>
+    <p class="small muted">🔒 <b>{verifying.user_name || verifying.title}</b>（{verifying.title}）设置了“使用前需要验证”，请输入主密码。</p>
+    <form class="row" onsubmit={verifyAndUse}>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="input" type="password" bind:value={vpw} placeholder="主密码" autofocus disabled={busy} />
+      <button class="btn primary" disabled={busy || !vpw}>{busy ? '…' : '登录'}</button>
+    </form>
+    <div class="acts">
+      <button class="btn ghost sm" disabled={busy} onclick={() => { verifying = null; error = ''; }}>‹ 返回</button>
+      <span class="spacer"></span>
+      <button class="btn" onclick={() => cancel()}>取消</button>
+    </div>
   {:else if ctx?.kind === 'passkey'}
     <h3>使用通行密钥登录 {ctx.rpId}</h3>
     <div class="list">
       {#each ctx.passkeys ?? [] as p (p.passkey_id)}
-        <button class="opt" disabled={busy} onclick={() => usePasskey(p.vault_id, p.item_id, p.passkey_id)}><b>{p.user_name || p.title}</b><span class="faint small">{p.title}</span></button>
+        <button class="opt" disabled={busy} onclick={() => usePasskey(p)}><b>{p.reprompt ? '🔒 ' : ''}{p.user_name || p.title}</b><span class="faint small">{p.title}</span></button>
       {:else}
         <p class="small muted">NyaPassword 里没有 {ctx.rpId} 的通行密钥。</p>
       {/each}

@@ -2,6 +2,11 @@
 // Extension pages (popup, vault page, inline menu, prompts) call it; content
 // scripts can only ask for fills and offer saves, and their origin is always
 // the one Chrome reports for the sending frame.
+//
+// Items marked "使用前需要验证" (`reprompt`): their secrets go to a page only
+// after the user typed the master password in the inline menu, the prompt or
+// the popup (`ctx:verify` / `popup:verify`), for that context and item, once
+// (src/lib/reprompt.ts). The shortcut and fill on page load skip them.
 
 import { createBridge, persistReplica, wasmClient } from '$lib/bridge-wasm';
 import type { Bridge } from '$lib/bridge';
@@ -9,8 +14,9 @@ import * as npw from '../../../common/web/src/wasm/pkg/npw.js';
 import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, ToContent } from '../lib/rpc';
 import { b64, unb64 } from '../lib/rpc';
 import { clearPairing, DesktopPort, generatePairingKey, HOST_NAME, loadPairing, pairingCode, rawPublicKey, requestAccountKey, savePairing, type Pairing } from '../lib/desktop-link';
+import { consume, grant, loadTarget, saveOffer, shortcutTarget, type Verifiable } from '../lib/reprompt';
 
-interface Ctx {
+interface Ctx extends Verifiable {
   kind: Context['kind'];
   tabId: number;
   frameId: number;
@@ -32,6 +38,8 @@ const contexts = new Map<string, Ctx>();
 const pendingPrompt = new Map<number, { n: string; site: string; expires: number }>();
 let ws: WebSocket | null = null;
 let autoLockMinutes = 10;
+/** The popup's verification of a reprompt item (kept in memory only). */
+const popupGrant: Verifiable = {};
 
 const EXT_PAGE = () => chrome.runtime.getURL('');
 
@@ -97,6 +105,10 @@ async function onUnlocked() {
 async function doLock(reason = '') {
   console.info('NyaPassword: lock', reason);
   wasmClient().lock();
+  // verifications of "使用前需要验证" items end with the session
+  delete popupGrant.verified;
+  for (const c of contexts.values()) delete c.verified;
+  await saveContexts().catch(() => {});
   await chrome.storage.session.remove('ak');
   chrome.alarms.clear('autolock');
   chrome.alarms.clear('sync');
@@ -241,8 +253,35 @@ async function clearClipboard() {
 async function candidates(url: string): Promise<Candidate[]> {
   const b = await core();
   if (!(await b.lockState()).unlocked) return [];
-  const views = wasmClient().autofillCandidates(url) as { vault_id: string; item_id: string; title: string; subtitle: string; has_totp: boolean; passkeys: number }[];
-  return views.map((v) => ({ vault_id: v.vault_id, item_id: v.item_id, title: v.title, username: v.subtitle, has_totp: v.has_totp, passkeys: v.passkeys }));
+  const views = wasmClient().autofillCandidates(url) as { vault_id: string; item_id: string; title: string; subtitle: string; has_totp: boolean; passkeys: number; reprompt?: boolean }[];
+  return views.map((v) => ({ vault_id: v.vault_id, item_id: v.item_id, title: v.title, username: v.subtitle, has_totp: v.has_totp, passkeys: v.passkeys, reprompt: !!v.reprompt }));
+}
+
+/** A fill / copy / passkey of `item` may go ahead in `holder` (a context or the popup); uses up a verification. */
+async function requireVerified(holder: Verifiable, item: { vault_id: string; item_id: string; reprompt?: boolean }) {
+  const ok = consume(holder, item);
+  await saveContexts();
+  if (!ok) throw { code: 'reprompt', message: '这个条目需要先验证主密码' };
+}
+
+/** Checks the master password (Argon2: slow on purpose) for one item in `holder`. */
+async function verifyFor(holder: Verifiable, vaultId: string, itemId: string, password: string) {
+  delete holder.verified;
+  delete holder.verifiedAt;
+  if (!(await (await core()).lockState()).unlocked) throw { code: 'locked', message: '已锁定，请先解锁' };
+  try {
+    wasmClient().verifyPassword(password);
+  } finally {
+    touch();
+  }
+  grant(holder, vaultId, itemId);
+  await saveContexts();
+}
+
+/** Whether an item is marked "使用前需要验证" (the views carry it, the content is not needed). */
+async function isReprompt(vaultId: string, itemId: string): Promise<boolean> {
+  const v = await (await core()).item(vaultId, itemId);
+  return !!v.reprompt;
 }
 
 async function credentialsFor(url: string, vaultId: string, itemId: string) {
@@ -272,13 +311,13 @@ async function profileCandidates(kind: string): Promise<Candidate[]> {
   const out: Candidate[] = [];
   for (const v of list) {
     let subtitle = v.subtitle;
-    if (kind === 'card') {
+    if (kind === 'card' && !v.reprompt) {
       // show the last four digits so cards can be told apart
       const number = (await b.item(v.vault_id, v.item_id)).content?.fields.find((f) => f.id === 'number')?.value;
       const last4 = typeof number === 'string' ? number.replace(/\D/g, '').slice(-4) : '';
       if (last4) subtitle = [v.subtitle, `•••• ${last4}`].filter(Boolean).join(' · ');
     }
-    out.push({ vault_id: v.vault_id, item_id: v.item_id, title: v.title, username: subtitle, has_totp: false, passkeys: 0 });
+    out.push({ vault_id: v.vault_id, item_id: v.item_id, title: v.title, username: subtitle, has_totp: false, passkeys: 0, reprompt: !!v.reprompt });
   }
   return out;
 }
@@ -397,13 +436,13 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       if (never.includes(origin)) return null;
       let offer: 'new' | 'update' | null = 'new';
       if (st.unlocked) {
-        const list = await candidates(url);
-        for (const c of list) {
+        // values are compared here only; the page learns nothing about a reprompt item's password
+        const saved = [];
+        for (const c of await candidates(url)) {
           const creds = await credentialsFor(url, c.vault_id, c.item_id).catch(() => null);
-          if (!creds) continue;
-          if (creds.username === msg.username && creds.password === msg.password) offer = null;
-          else if (creds.username === msg.username && offer !== null) offer = 'update';
+          if (creds) saved.push({ reprompt: c.reprompt, username: creds.username, password: creds.password });
         }
+        offer = saveOffer(saved, msg.username, msg.password);
       }
       if (!offer) return null;
       const n = nonce();
@@ -417,9 +456,9 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       // optional (off by default): fill the only matching login when the page loads
       const { autofillOnLoad } = await chrome.storage.local.get('autofillOnLoad');
       if (autofillOnLoad !== true || !st.unlocked || !secureContext(url) || crossSite(sender)) return false;
-      const list = await candidates(url);
-      if (list.length !== 1) return false;
-      const { username, password } = await credentialsFor(url, list[0]!.vault_id, list[0]!.item_id);
+      const only = loadTarget(await candidates(url));
+      if (!only) return false;
+      const { username, password } = await credentialsFor(url, only.vault_id, only.item_id);
       await chrome.tabs.sendMessage(tabId, { t: 'fill', username, password } satisfies ToContent, { frameId: sender.frameId ?? 0 });
       return true;
     }
@@ -454,6 +493,7 @@ async function ctxView(n: string): Promise<Context> {
     const list = await candidates(c.url);
     let updateTitle: string | undefined;
     for (const cand of list) {
+      if (cand.reprompt) continue;
       const creds = await credentialsFor(c.url, cand.vault_id, cand.item_id).catch(() => null);
       if (creds?.username === c.capture.username) updateTitle = cand.title;
     }
@@ -503,15 +543,28 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       await onUnlocked();
       return ctxView(msg.n);
     }
+    case 'ctx:verify': {
+      // the master password for one item of this menu / prompt ("使用前需要验证")
+      const c = contexts.get(msg.n);
+      if (!c) throw { code: 'not_found', message: 'expired' };
+      await verifyFor(c, msg.vault_id, msg.item_id, msg.password);
+      return true;
+    }
     case 'ctx:fill': {
       const c = contexts.get(msg.n);
       if (!c) throw { code: 'not_found', message: 'expired' };
       if (isProfile(c.fieldKind)) {
         if (c.fieldKind === 'card' && !secureContext(c.url)) throw { code: 'forbidden', message: '这个页面没有加密（http），不填写银行卡' };
+        const choice = (await profileCandidates(c.fieldKind!)).find((x) => x.vault_id === msg.vault_id && x.item_id === msg.item_id);
+        if (!choice) throw { code: 'forbidden', message: 'not a matching item' };
+        await requireVerified(c, choice);
         const profile = await profileValues(c.fieldKind!, msg.vault_id, msg.item_id);
         await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, profile } satisfies ToContent, { frameId: c.frameId });
         return true;
       }
+      const choice = (await candidates(c.url)).find((x) => x.vault_id === msg.vault_id && x.item_id === msg.item_id);
+      if (!choice) throw { code: 'forbidden', message: 'this item is not saved for this site' };
+      await requireVerified(c, choice);
       const creds = await credentialsFor(c.url, msg.vault_id, msg.item_id);
       await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, ...creds } satisfies ToContent, { frameId: c.frameId });
       return true;
@@ -550,12 +603,22 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
           const created = wasmClient().passkeyCreate(caller, c.passkey.request, t?.vault_id, t?.item_id, msg.choice.vault_id) as { response: unknown };
           response = created.response;
         } else {
-          response = wasmClient().passkeyGet(caller, c.passkey.request, msg.choice.vault_id, msg.choice.item_id, msg.choice.passkey_id ?? '');
+          const choice = msg.choice;
+          const offered = (wasmClient().passkeyCandidates(caller, c.passkey.request) as { vault_id: string; item_id: string; passkey_id: string; reprompt?: boolean }[]).find(
+            (p) => p.vault_id === choice.vault_id && p.item_id === choice.item_id && p.passkey_id === choice.passkey_id,
+          );
+          if (offered?.reprompt && !consume(c, offered)) {
+            // not answered yet: the prompt asks for the master password and tries again
+            await saveContexts();
+            throw { code: 'reprompt', message: '这个通行密钥需要先验证主密码' };
+          }
+          response = wasmClient().passkeyGet(caller, c.passkey.request, choice.vault_id, choice.item_id, choice.passkey_id ?? '');
         }
         persistReplica();
         void doSync();
         await finishPasskey(c, { response });
       } catch (e) {
+        if ((e as { code?: string }).code === 'reprompt') throw e;
         const m = String((e as { message?: string }).message ?? e);
         const name = /passkey:(\w+):/.exec(m)?.[1] ?? 'NotAllowedError';
         await finishPasskey(c, { error: { name, message: m.replace(/^.*passkey:\w+:/, '') } });
@@ -572,10 +635,27 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       await saveContexts();
       return true;
     }
-    case 'popup:fill':
+    case 'popup:fill': {
+      await requireVerified(popupGrant, { vault_id: msg.vault_id, item_id: msg.item_id, reprompt: await isReprompt(msg.vault_id, msg.item_id) });
       return fillTab(msg.tabId, msg.vault_id, msg.item_id);
+    }
     case 'popup:candidates':
       return candidates(msg.url);
+    case 'popup:verify':
+      await verifyFor(popupGrant, msg.vault_id, msg.item_id, msg.password);
+      return true;
+    case 'popup:secret': {
+      // copying from the popup: the username freely, secrets of a reprompt item after popup:verify
+      const view = await b.item(msg.vault_id, msg.item_id);
+      if (msg.what !== 'username') await requireVerified(popupGrant, { vault_id: msg.vault_id, item_id: msg.item_id, reprompt: !!view.reprompt });
+      const fields = view.content?.fields ?? [];
+      if (msg.what === 'totp') {
+        const uri = fields.find((f) => f.kind === 'totp' && typeof f.value === 'string' && f.value)?.value as string | undefined;
+        return uri ? (npw.otpCode(uri, Math.floor(Date.now() / 1000)) as { code: string }).code : '';
+      }
+      const v = fields.find((f) => f.purpose === msg.what)?.value;
+      return typeof v === 'string' ? v : '';
+    }
     case 'desktop:status':
       return desktopStatus();
     case 'desktop:unlock':
@@ -597,6 +677,8 @@ async function saveCapture(c: Ctx, vaultId?: string) {
   const cap = c.capture!;
   const list = await candidates(c.url);
   for (const cand of list) {
+    // never changed through a page's form submission (the prompt did not offer it)
+    if (cand.reprompt) continue;
     const creds = await credentialsFor(c.url, cand.vault_id, cand.item_id).catch(() => null);
     if (creds?.username === cap.username) {
       const view = await b.item(cand.vault_id, cand.item_id);
@@ -625,6 +707,19 @@ async function saveCapture(c: Ctx, vaultId?: string) {
 // a page copied a secret: clear the clipboard in 90 s
 
 
+/** The fill shortcut (Ctrl+Shift+L): the active tab's first match that does not ask for verification. */
+async function fillShortcut(): Promise<number> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !tab.url) return 0;
+  // "使用前需要验证" items are skipped: nobody chose them in an extension UI
+  const first = shortcutTarget(await candidates(tab.url));
+  return first ? fillTab(tab.id, first.vault_id, first.item_id) : 0;
+}
+
+// tests/e2e.mjs runs the shortcut's action from the worker: automated browsers
+// do not deliver extension shortcuts. Only code in this worker can reach it.
+Object.assign(globalThis, { npwFillShortcut: fillShortcut });
+
 function registerListeners() {
   chrome.alarms.onAlarm.addListener(async (a) => {
     await core();
@@ -645,11 +740,7 @@ function registerListeners() {
   });
 
   chrome.commands.onCommand.addListener(async (cmd) => {
-    if (cmd !== 'fill-login') return;
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || !tab.url) return;
-    const list = await candidates(tab.url);
-    if (list[0]) await fillTab(tab.id, list[0].vault_id, list[0].item_id);
+    if (cmd === 'fill-login') await fillShortcut();
   });
 
   chrome.tabs.onActivated.addListener(async ({ tabId }) => {

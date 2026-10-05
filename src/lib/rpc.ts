@@ -9,6 +9,8 @@ export interface Candidate {
   username: string;
   has_totp: boolean;
   passkeys: number;
+  /** "使用前需要验证": the master password is asked before filling (`ctx:verify`). */
+  reprompt?: boolean;
 }
 
 /** What an inline menu / prompt iframe gets for its nonce. */
@@ -33,7 +35,7 @@ export interface Context {
   op?: 'create' | 'get';
   rpId?: string;
   user?: string;
-  passkeys?: { vault_id: string; item_id: string; passkey_id: string; title: string; user_name: string }[];
+  passkeys?: { vault_id: string; item_id: string; passkey_id: string; title: string; user_name: string; reprompt?: boolean }[];
   logins?: Candidate[];
 }
 
@@ -48,6 +50,7 @@ export type PageRequest =
   | { t: 'call'; m: string; a: unknown[] }
   | { t: 'ctx:get'; n: string }
   | { t: 'ctx:unlock'; n: string; password: string }
+  | { t: 'ctx:verify'; n: string; vault_id: string; item_id: string; password: string }
   | { t: 'ctx:fill'; n: string; vault_id: string; item_id: string }
   | { t: 'ctx:generate'; n: string }
   | { t: 'ctx:save'; n: string; vault_id?: string; never?: boolean }
@@ -55,6 +58,8 @@ export type PageRequest =
   | { t: 'ctx:cancel'; n: string; fallback?: boolean }
   | { t: 'popup:fill'; tabId: number; vault_id: string; item_id: string }
   | { t: 'popup:candidates'; url: string }
+  | { t: 'popup:verify'; vault_id: string; item_id: string; password: string }
+  | { t: 'popup:secret'; vault_id: string; item_id: string; what: 'username' | 'password' | 'totp' }
   | { t: 'desktop:status' }
   | { t: 'desktop:unlock' }
   | { t: 'desktop:pair' }

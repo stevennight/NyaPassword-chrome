@@ -31,6 +31,11 @@
   let deskBusy = $state(false);
   let deskMsg = $state('');
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  // "使用前需要验证" items: the master password before filling / copying a secret
+  let verifying = $state<{ it: ItemView; action: 'fill' | 'password' | 'totp' } | null>(null);
+  let vpw = $state('');
+  let vbusy = $state(false);
+  let verror = $state('');
 
   onMount(() => {
     void (async () => {
@@ -99,7 +104,7 @@
     here = [];
     if (lockSt.unlocked && tab?.url && /^https?:/.test(tab.url)) {
       const list = await send<Candidate[]>({ t: 'popup:candidates', url: tab.url });
-      here = list.map((c) => ({ vault_id: c.vault_id, item_id: c.item_id, title: c.title, subtitle: c.username, has_totp: c.has_totp, template: 'login' }) as ItemView);
+      here = list.map((c) => ({ vault_id: c.vault_id, item_id: c.item_id, title: c.title, subtitle: c.username, has_totp: c.has_totp, reprompt: c.reprompt, template: 'login' }) as ItemView);
     }
   }
 
@@ -119,23 +124,48 @@
     }
   }
 
-  async function fill(it: ItemView) {
+  async function fill(it: ItemView, verified = false) {
     if (!tab?.id) return;
+    if (it.reprompt && !verified) return ask(it, 'fill');
     const n = await send<number>({ t: 'popup:fill', tabId: tab.id, vault_id: it.vault_id, item_id: it.item_id });
     if (n > 0) window.close();
     else flash('这个页面上没有找到可以填写的登录框');
   }
 
-  async function copy(it: ItemView, what: 'username' | 'password' | 'totp') {
-    const full = await bridge.item(it.vault_id, it.item_id);
-    const fields = full.content?.fields ?? [];
-    let text = '';
-    if (what === 'totp') {
-      const uri = fields.find((f) => f.kind === 'totp')?.value as string | undefined;
-      text = uri ? (bridge.otpCode(uri, Math.floor(Date.now() / 1000))?.code ?? '') : '';
-    } else {
-      text = String(fields.find((f) => f.purpose === what)?.value ?? '');
+  function ask(it: ItemView, action: 'fill' | 'password' | 'totp') {
+    verifying = { it, action };
+    vpw = '';
+    verror = '';
+  }
+
+  /** The service worker checks the master password for this item; the action then goes ahead once. */
+  async function verifyAndRun(e: Event) {
+    e.preventDefault();
+    if (!verifying || vbusy) return;
+    const { it, action } = verifying;
+    vbusy = true;
+    verror = '';
+    try {
+      await send({ t: 'popup:verify', vault_id: it.vault_id, item_id: it.item_id, password: vpw });
+      vpw = '';
+      verifying = null;
+      if (action === 'fill') await fill(it, true);
+      else await copy(it, action, true);
+    } catch (err) {
+      const x = err as { code: string; message: string };
+      verror = x.code === 'wrong_password' ? '主密码不正确' : x.message;
+    } finally {
+      vbusy = false;
     }
+  }
+
+  async function copy(it: ItemView, what: 'username' | 'password' | 'totp', verified = false) {
+    if (it.reprompt && what !== 'username' && !verified) return ask(it, what);
+    const text = await send<string>({ t: 'popup:secret', vault_id: it.vault_id, item_id: it.item_id, what }).catch((e) => {
+      flash((e as { message: string }).message);
+      return null;
+    });
+    if (text === null) return;
     if (!text) return flash('没有这个字段');
     await bridge.copy(text, what !== 'username');
     flash(what === 'username' ? '已复制用户名' : `已复制${what === 'password' ? '密码' : '验证码'}，90 秒后清除`);
@@ -245,6 +275,20 @@
       {/if}
     </form>
   {:else}
+    {#if verifying}
+      <form class="verify" onsubmit={verifyAndRun}>
+        <div class="t">🔒 {verifying.it.title}</div>
+        <div class="muted small">这个条目设置了“使用前需要验证”。{verifying.action === 'fill' ? '填写' : verifying.action === 'password' ? '复制密码' : '复制验证码'}前，请输入主密码。</div>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input class="input" type="password" bind:value={vpw} placeholder="主密码" autofocus disabled={vbusy} />
+        <div class="row">
+          <button type="button" class="btn ghost sm" onclick={() => (verifying = null)}>‹ 返回</button>
+          <span class="spacer"></span>
+          <button class="btn primary sm" disabled={vbusy || !vpw}>{vbusy ? '验证中…' : '验证'}</button>
+        </div>
+        {#if verror}<div class="banner bad small">{verror}</div>{/if}
+      </form>
+    {/if}
     <input class="input" bind:value={q} oninput={search} placeholder="搜索全部条目（支持拼音）" />
     {#if !q}
       <div class="grp">此网站 · {tab?.url ? bridge.displayHost(tab.url) : ''}</div>
@@ -252,7 +296,7 @@
         {@const a = avatar(it.title, it.template)}
         <div class="it">
           <div class="ico" style="background:{a.color}">{a.letter}</div>
-          <button class="grow txt" onclick={() => (open = open?.item_id === it.item_id ? null : it)}><div class="t">{it.title}</div><div class="s">{it.subtitle}</div></button>
+          <button class="grow txt" onclick={() => (open = open?.item_id === it.item_id ? null : it)}><div class="t">{it.reprompt ? '🔒 ' : ''}{it.title}</div><div class="s">{it.subtitle}</div></button>
           <button class="btn sm primary" onclick={() => fill(it)}>填写</button>
         </div>
         {#if open?.item_id === it.item_id}
@@ -270,7 +314,7 @@
         {@const a = avatar(it.title, it.template)}
         <div class="it">
           <div class="ico" style="background:{a.color}">{a.letter}</div>
-          <div class="grow"><div class="t">{it.title}</div><div class="s">{it.subtitle}</div></div>
+          <div class="grow"><div class="t">{it.reprompt ? '🔒 ' : ''}{it.title}</div><div class="s">{it.subtitle}</div></div>
           <button class="btn sm" onclick={() => copy(it, 'password')}>密码</button>
           {#if it.has_totp}<button class="btn sm" onclick={() => copy(it, 'totp')}>验证码</button>{/if}
         </div>
@@ -304,6 +348,7 @@
   .s { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .acts { display: flex; gap: 6px; padding: 0 4px 6px 42px; flex-wrap: wrap; }
   .pad { padding: 6px 4px; }
+  .verify { display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); border-radius: 10px; padding: 10px; }
   .gen { display: flex; gap: 8px; align-items: center; background: var(--surface-2); border-radius: 8px; padding: 6px 8px; word-break: break-all; }
   .settings { display: flex; flex-direction: column; gap: 8px; background: var(--surface-2); border-radius: 10px; padding: 10px; }
   .settings .opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }

@@ -1,7 +1,8 @@
 // End-to-end test of the built extension (.output/chrome-mv3) in Chromium:
 // a fresh NyaPassword server, an account created through the extension,
-// autofill through the inline menu, the save/update prompt, and a passkey
-// registered and used on a test relying party (signature verified by the page).
+// autofill through the inline menu, the save/update prompt, items marked
+// "使用前需要验证" (reprompt), and a passkey registered and used on a test
+// relying party (signature verified by the page).
 //
 //   npm run build && node tests/e2e.mjs
 //   NPW_SERVER_BIN=<path to nyapassword-server> to use another server build.
@@ -127,6 +128,61 @@ try {
   check('save prompt updates the password', !!updated);
   check('old password kept in history', updated.content.history?.some((h) => h.value === 'old-password-1'));
 
+  // ---- "使用前需要验证" (reprompt): the inline menu asks for the master password, the shortcut skips the item
+  const PASSWORD = 'e2e test password 2026';
+  const login = async (title, user, pw, reprompt) => {
+    const it = await rpc('newItem', 'login');
+    it.title = title;
+    it.fields.find((f) => f.id === 'username').value = user;
+    it.fields.find((f) => f.id === 'password').value = pw;
+    it.urls = [{ id: 'u1', url: `http://localhost:${FIXTURE_PORT}`, match: 'domain' }];
+    if (reprompt) it.reprompt = true;
+    return rpc('saveItem', vault, null, it);
+  };
+  await login('Open login', 'carol@example.com', 'open-pass-1', false);
+  await new Promise((r) => setTimeout(r, 30)); // newer: the guarded login is the first match
+  const guardedId = await login('Guarded login', 'bob@example.com', 'guarded-pass-1', true);
+  check('reprompt flag on the item view', (await rpc('listItems', {})).find((i) => i.item_id === guardedId)?.reprompt === true);
+
+  const gp = await ctx.newPage();
+  await gp.goto(`http://localhost:${FIXTURE_PORT}/login.html`);
+  await gp.waitForTimeout(500);
+  await gp.click('#account');
+  const gm = await waitFor(async () => gp.frames().find((f) => f.url().includes('/inline.html') && !f.isDetached()));
+  const guardedOpt = 'button.opt:has-text("Guarded login")';
+  await gm.waitForSelector(guardedOpt);
+  const gn = new URL(gm.url()).searchParams.get('n');
+  check('inline menu marks the reprompt login', (await gm.$(`${guardedOpt} .lock`)) !== null);
+  await gp.waitForTimeout(400);
+  await gm.click(guardedOpt);
+  await gm.waitForSelector('form.verify input[type=password]');
+  await gp.waitForTimeout(500);
+  check('picking a reprompt login asks for the master password', (await gp.inputValue('#pwd')) === '' && (await gp.inputValue('#account')) === '');
+  // the service worker enforces it: a fill request without the password is refused
+  const direct = await vaultPage.evaluate(([n, v, i]) => chrome.runtime.sendMessage({ t: 'ctx:fill', n, vault_id: v, item_id: i }), [gn, vault, guardedId]);
+  check('service worker refuses to fill without verification', direct?.ok === false && direct.e?.code === 'reprompt', JSON.stringify(direct?.e));
+  await gm.fill('form.verify input[type=password]', 'not the password');
+  await gm.click('form.verify button:not(.back)');
+  await gm.waitForSelector('.err:has-text("主密码不正确")', { timeout: 20000 });
+  await gp.waitForTimeout(500);
+  check('a wrong password does not fill', (await gp.inputValue('#pwd')) === '' && (await gp.inputValue('#account')) === '');
+  await gm.fill('form.verify input[type=password]', PASSWORD);
+  await gm.click('form.verify button:not(.back)');
+  const guardedFilled = await waitFor(async () => ((await gp.inputValue('#pwd')) === 'guarded-pass-1' ? true : undefined), 20000).catch(() => false);
+  check('the right password fills the reprompt login', guardedFilled && (await gp.inputValue('#account')) === 'bob@example.com');
+  const again = await vaultPage.evaluate(([n, v, i]) => chrome.runtime.sendMessage({ t: 'ctx:fill', n, vault_id: v, item_id: i }), [gn, vault, guardedId]);
+  check('a verification fills once', again?.ok === false && again.e?.code === 'reprompt', JSON.stringify(again?.e));
+
+  // the fill shortcut (Ctrl+Shift+L) takes the first match that does not ask: the open login
+  // (automated browsers do not deliver extension shortcuts: run its action in the worker)
+  const sp = await ctx.newPage();
+  await sp.goto(`http://localhost:${FIXTURE_PORT}/login.html`);
+  await sp.waitForTimeout(800);
+  await sp.bringToFront();
+  await sw.evaluate(() => globalThis.npwFillShortcut());
+  const viaShortcut = await waitFor(async () => (await sp.inputValue('#pwd')) || undefined, 8000).catch(() => '');
+  check('the fill shortcut skips the reprompt login', viaShortcut === 'open-pass-1' && (await sp.inputValue('#account')) === 'carol@example.com', viaShortcut || 'nothing filled');
+
   // ---- passkeys
   const rp = await ctx.newPage();
   await rp.goto(`http://localhost:${FIXTURE_PORT}/passkey.html`);
@@ -150,6 +206,27 @@ try {
   check('passkey sign-in verified by the RP', asserted.startsWith('VERIFIED'), asserted);
   const withPasskey = (await rpc('listItems', {})).find((i) => i.passkeys > 0);
   check('passkey stored in the vault', !!withPasskey, withPasskey?.title);
+
+  // a passkey of a reprompt item: the prompt asks for the master password before signing
+  const pkItem = await rpc('item', withPasskey.vault_id, withPasskey.item_id);
+  pkItem.content.reprompt = true;
+  await rpc('saveItem', withPasskey.vault_id, withPasskey.item_id, pkItem.content);
+  await rp.evaluate(() => (document.getElementById('out').textContent = ''));
+  await rp.click('#get');
+  const p3 = await waitFor(async () => rp.frames().find((f) => f !== p2 && f.url().includes('/prompt.html') && !f.isDetached()));
+  await p3.waitForSelector('button.opt');
+  await p3.click('button.opt');
+  await p3.waitForSelector('input[type=password]');
+  await rp.waitForTimeout(300);
+  check('a reprompt passkey asks for the master password', !(await rp.textContent('#out')));
+  await p3.fill('input[type=password]', 'not the password');
+  await p3.click('form button.primary');
+  await p3.waitForSelector('.err:has-text("主密码不正确")', { timeout: 20000 });
+  check('a wrong password does not sign', !(await rp.textContent('#out')));
+  await p3.fill('input[type=password]', PASSWORD);
+  await p3.click('form button.primary');
+  const asserted2 = await waitFor(async () => (await rp.textContent('#out')) || undefined, 20000).catch(() => '');
+  check('the right password signs with the reprompt passkey', asserted2.startsWith('VERIFIED'), asserted2);
 
   // ---- bank card and shipping address (not bound to a site: picked from the menu)
   const card = await rpc('newItem', 'credit_card');

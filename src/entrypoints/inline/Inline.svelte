@@ -2,13 +2,16 @@
   import { onMount } from 'svelte';
   import { avatar } from '$lib/ui.svelte';
   import Logo from '../../../../common/web/src/components/Logo.svelte';
-  import { send, type Context } from '../../lib/rpc';
+  import { send, type Candidate, type Context } from '../../lib/rpc';
 
   const n = new URLSearchParams(location.search).get('n') ?? '';
   let ctx = $state<Context | null>(null);
   let error = $state('');
   let password = $state('');
   let busy = $state(false);
+  /** A "使用前需要验证" item the user picked: the master password first. */
+  let verifying = $state<Candidate | null>(null);
+  let vpw = $state('');
 
   onMount(load);
   async function load() {
@@ -33,7 +36,33 @@
     }
   }
 
-  const pick = (v: string, i: string) => send({ t: 'ctx:fill', n, vault_id: v, item_id: i }).catch((e) => (error = e.message));
+  function pick(c: Candidate) {
+    error = '';
+    if (c.reprompt) {
+      verifying = c;
+      vpw = '';
+      return;
+    }
+    send({ t: 'ctx:fill', n, vault_id: c.vault_id, item_id: c.item_id }).catch((e) => (error = e.message));
+  }
+
+  /** The service worker checks the password, then fills this item once. */
+  async function verifyAndFill(e: Event) {
+    e.preventDefault();
+    if (!verifying || busy) return;
+    const c = verifying;
+    busy = true;
+    error = '';
+    try {
+      await send({ t: 'ctx:verify', n, vault_id: c.vault_id, item_id: c.item_id, password: vpw });
+      vpw = '';
+      await send({ t: 'ctx:fill', n, vault_id: c.vault_id, item_id: c.item_id });
+    } catch (err) {
+      error = (err as { code: string }).code === 'wrong_password' ? '主密码不正确' : (err as { message: string }).message;
+    } finally {
+      busy = false;
+    }
+  }
   const generate = () => send({ t: 'ctx:generate', n }).catch((e) => (error = e.message));
   const close = () => send({ t: 'ctx:cancel', n });
   const openVault = () => chrome.tabs.create({ url: chrome.runtime.getURL('/vault.html') });
@@ -42,7 +71,7 @@
   const emptyText = $derived(template === 'credit_card' ? '还没有保存银行卡' : template === 'identity' ? '还没有保存身份信息' : '没有保存这个网站的登录');
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && close()} />
+<svelte:window onkeydown={(e) => { if (e.key !== 'Escape') return; if (verifying) { verifying = null; error = ''; } else void close(); }} />
 
 <div class="menu">
   <div class="h"><Logo size={14} /><span class="grow">NyaPassword · {ctx?.host ?? ''}</span><button class="x" onclick={close} aria-label="关闭">✕</button></div>
@@ -54,17 +83,29 @@
       <input type="password" bind:value={password} placeholder="主密码解锁" autofocus />
       <button disabled={busy || !password}>{busy ? '…' : '解锁'}</button>
     </form>
+  {:else if ctx && verifying}
+    <form class="verify" onsubmit={verifyAndFill}>
+      <div class="vt">🔒 <b>{verifying.title}</b> 需要验证</div>
+      <div class="vs">这个条目设置了“使用前需要验证”，填写前请输入主密码。</div>
+      <div class="unlock">
+        <!-- svelte-ignore a11y_autofocus -->
+        <input type="password" bind:value={vpw} placeholder="主密码" autofocus disabled={busy} />
+        <button disabled={busy || !vpw}>{busy ? '…' : '填写'}</button>
+      </div>
+      <button type="button" class="back" onclick={() => { verifying = null; error = ''; }}>‹ 返回</button>
+    </form>
   {:else if ctx}
     <div class="list">
       {#each ctx.candidates ?? [] as c (c.item_id)}
         {@const a = avatar(c.title, template)}
-        <button class="opt" onclick={() => pick(c.vault_id, c.item_id)}>
+        <button class="opt" onclick={() => pick(c)}>
           <span class="ico" style="background:{a.color}">{a.letter}</span>
           {#if template === 'login'}
             <span class="grow"><span class="t">{c.username || c.title}</span><span class="s">{c.title}{c.has_totp ? ' · 含验证码' : ''}</span></span>
           {:else}
             <span class="grow"><span class="t">{c.title}</span><span class="s">{c.username}</span></span>
           {/if}
+          {#if c.reprompt}<span class="lock" title="使用前需要验证">🔒</span>{/if}
           {#if c.passkeys}<span class="badge">passkey</span>{/if}
         </button>
       {:else}
@@ -99,4 +140,10 @@
   .unlock button { border: 0; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 0 14px; font-weight: 600; }
   .warn { font-size: 12px; background: var(--warn-bg, #fff4e0); color: var(--warn, #8a5300); border-radius: 8px; margin: 0 8px 6px; padding: 6px 8px; line-height: 1.4; }
   .err { color: var(--bad); font-size: 12.5px; padding: 0 10px 6px; }
+  .lock { font-size: 11px; opacity: .7; }
+  .verify { display: flex; flex-direction: column; gap: 4px; padding: 4px 6px; }
+  .verify .unlock { padding: 6px 4px; }
+  .vt { font-size: 13.5px; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vs { font-size: 12px; color: var(--text-2); padding: 0 4px; }
+  .back { align-self: flex-start; border: 0; background: none; color: var(--accent); font-size: 12.5px; cursor: pointer; padding: 4px; }
 </style>
