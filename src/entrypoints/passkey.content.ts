@@ -58,7 +58,7 @@ export default defineContentScript({
         };
         const noAck = setTimeout(() => {
           done();
-          console.debug('[NyaPassword] no answer from the extension, using the browser for this request');
+          console.info('[NyaPassword] no answer from the extension, using the browser for this request');
           resolve({ fallback: true });
         }, ACK_MS);
         const onMsg = (e: MessageEvent) => {
@@ -80,7 +80,7 @@ export default defineContentScript({
     }
 
     function trace(op: string, o: { rpId?: string; rp?: { id?: string }; allowCredentials?: unknown[] }, mediation?: string) {
-      console.debug(`[NyaPassword] WebAuthn ${op}`, { rpId: o.rpId ?? o.rp?.id ?? location.hostname, mediation: mediation ?? 'optional', allowCredentials: o.allowCredentials?.length ?? 0 });
+      console.info(`[NyaPassword] WebAuthn ${op}`, { rpId: o.rpId ?? o.rp?.id ?? location.hostname, mediation: mediation ?? 'optional', allowCredentials: o.allowCredentials?.length ?? 0 });
     }
 
     function own(target: object, props: Record<string, unknown>) {

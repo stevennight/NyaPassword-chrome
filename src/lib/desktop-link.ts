@@ -155,7 +155,7 @@ export class DesktopPort {
     p.onMessage.addListener((m) => this.receive(m as Reply));
     p.onDisconnect.addListener(() => {
       if (this.port === p) this.port = null;
-      this.lastError ||= this.lastErrorFn() || '桌面端断开了连接';
+      this.lastError ||= explainNativeError(this.lastErrorFn()) || '桌面端断开了连接';
       for (const [rid, w] of this.waiting) {
         clearTimeout(w.timer);
         w.resolve({ type: 'error', code: 'disconnected', message: this.lastError });
@@ -216,4 +216,13 @@ export async function requestAccountKey(port: DesktopPort, pairing: Pairing, int
   const r = await port.request(msg, interactive ? INTERACTIVE_TIMEOUT_MS : 10_000);
   if (r.type !== 'unlock') throw { code: r.code ?? 'invalid', message: r.message ?? 'unexpected reply' };
   return openSealed(pairing.privateKey, pairing.publicKey, pairing.accountId, nonce, r as unknown as Sealed);
+}
+
+/** Chrome's native-messaging errors, in words the user can act on. */
+export function explainNativeError(message: string): string {
+  if (!message) return '';
+  if (/host not found/i.test(message)) return '找不到 NyaPassword 桌面端：请确认桌面端已安装并至少运行过一次，且在桌面端“设置 → 浏览器扩展”里打开了联动、填入了本扩展的 ID';
+  if (/forbidden/i.test(message)) return 'NyaPassword 桌面端没有允许这个扩展：请把本扩展的 ID 填到桌面端“设置 → 浏览器扩展”';
+  if (/host has exited/i.test(message)) return 'NyaPassword 桌面端的连接中断了，请确认桌面端在运行后重试';
+  return message;
 }

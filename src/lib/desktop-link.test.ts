@@ -80,7 +80,7 @@ describe('desktop port', () => {
     expect(events).toEqual(['locked']);
     const pending = port.request({ type: 'never answered' });
     fake.drop();
-    expect(await pending).toMatchObject({ type: 'error', code: 'disconnected', message: 'Native host has exited.' });
+    expect(await pending).toMatchObject({ type: 'error', code: 'disconnected', message: expect.stringContaining('连接中断') });
     expect(port.connected).toBe(false);
   });
 
@@ -127,3 +127,14 @@ async function sealForTest(extPub: Uint8Array<ArrayBuffer>, account: string, non
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: cat(enc.encode('npw/browser-bridge/unlock/v1'), enc.encode(account)) }, key, secret);
   return { eph_public_key: b64(ephRaw), iv: b64(iv), ciphertext: b64(new Uint8Array(ct)) };
 }
+
+describe('native messaging errors', () => {
+  it('explains Chrome errors in Chinese and keeps others', async () => {
+    const { explainNativeError } = await import('./desktop-link');
+    expect(explainNativeError('Specified native messaging host not found.')).toContain('找不到 NyaPassword 桌面端');
+    expect(explainNativeError('Access to the specified native messaging host is forbidden.')).toContain('没有允许这个扩展');
+    expect(explainNativeError('Native host has exited.')).toContain('中断');
+    expect(explainNativeError('something else')).toBe('something else');
+    expect(explainNativeError('')).toBe('');
+  });
+});
