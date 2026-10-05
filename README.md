@@ -29,6 +29,7 @@ npm install
 npm run build             # 输出 .output\chrome-mv3（在 chrome://extensions 开发者模式下“加载已解压的扩展程序”）
 npm run check; npm test
 node tests\e2e.mjs        # 端到端：新服务端 + Chromium 加载扩展，测试填写、保存提示、使用前验证、通行密钥、银行卡、地址
+node tests\passkey-sites.mjs   # 真实网站 webauthn.io 上注册 / 登录通行密钥（需要联网，不在 CI 里）
 node tests\matrix.mjs     # 真实网站登录页的表单识别（只打开页面，不输入）；结果记到 ../common/autofill/matrix.md
 ```
 

@@ -45,22 +45,42 @@ export default defineContentScript({
       return JSON.stringify({ challenge: toB64(o.challenge), timeout: o.timeout, rpId: o.rpId, allowCredentials: desc(o.allowCredentials), userVerification: o.userVerification });
     }
 
+    // the isolated content script acknowledges at once; without that (extension
+    // reloaded, content script not injected yet) the browser handles the request
+    const ACK_MS = 2000;
     let seq = 0;
     function ask(op: 'create' | 'get', request: string, conditional: boolean, signal?: AbortSignal): Promise<{ response?: Record<string, unknown>; error?: { name: string; message: string }; fallback?: boolean }> {
       const id = `${Date.now()}-${++seq}`;
       return new Promise((resolve, reject) => {
-        const onMsg = (e: MessageEvent) => {
-          if (e.source !== window || !e.data || e.data.npw !== 'pk-res' || e.data.id !== id) return;
+        const done = () => {
+          clearTimeout(noAck);
           window.removeEventListener('message', onMsg);
+        };
+        const noAck = setTimeout(() => {
+          done();
+          console.debug('[NyaPassword] no answer from the extension, using the browser for this request');
+          resolve({ fallback: true });
+        }, ACK_MS);
+        const onMsg = (e: MessageEvent) => {
+          if (e.source !== window || !e.data || e.data.id !== id) return;
+          if (e.data.npw === 'pk-ack') return clearTimeout(noAck);
+          if (e.data.npw !== 'pk-res') return;
+          done();
           resolve(e.data);
         };
         window.addEventListener('message', onMsg);
         signal?.addEventListener('abort', () => {
-          window.removeEventListener('message', onMsg);
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
+          done();
+          // the site gave up (timeout, another method): close our prompt too
+          window.postMessage({ npw: 'pk-abort', id }, location.origin);
+          reject(signal.reason instanceof DOMException ? signal.reason : new DOMException('The operation was aborted.', 'AbortError'));
         });
         window.postMessage({ npw: 'pk-req', id, op, request, conditional }, location.origin);
       });
+    }
+
+    function trace(op: string, o: { rpId?: string; rp?: { id?: string }; allowCredentials?: unknown[] }, mediation?: string) {
+      console.debug(`[NyaPassword] WebAuthn ${op}`, { rpId: o.rpId ?? o.rp?.id ?? location.hostname, mediation: mediation ?? 'optional', allowCredentials: o.allowCredentials?.length ?? 0 });
     }
 
     function own(target: object, props: Record<string, unknown>) {
@@ -100,6 +120,7 @@ export default defineContentScript({
 
     creds.create = async function (options?: CredentialCreationOptions) {
       if (!options?.publicKey) return origCreate(options);
+      trace('create', options.publicKey, (options as { mediation?: string }).mediation);
       const r = await ask('create', createJson(options.publicKey), false, options.signal);
       if (r.fallback) return origCreate(options);
       if (r.error) throw new DOMException(r.error.message, r.error.name);
@@ -109,6 +130,7 @@ export default defineContentScript({
     creds.get = async function (options?: CredentialRequestOptions) {
       if (!options?.publicKey) return origGet(options);
       const conditional = (options as { mediation?: string }).mediation === 'conditional';
+      trace('get', options.publicKey, (options as { mediation?: string }).mediation);
       const r = await ask('get', getJson(options.publicKey), conditional, options.signal);
       if (r.fallback) return origGet(options);
       if (r.error) throw new DOMException(r.error.message, r.error.name);

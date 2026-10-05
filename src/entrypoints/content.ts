@@ -282,9 +282,19 @@ export default defineContentScript({
     // ------------------------------------------------------------ passkeys (from the page-world script)
 
     window.addEventListener('message', async (e) => {
-      if (e.source !== window || !e.data || e.data.npw !== 'pk-req') return;
+      if (e.source !== window || !e.data) return;
+      if (e.data.npw === 'pk-abort') {
+        for (const [n, pageId] of pendingPasskeys) {
+          if (pageId !== e.data.id) continue;
+          pendingPasskeys.delete(n);
+          closeFrame(n);
+        }
+        return;
+      }
+      if (e.data.npw !== 'pk-req') return;
       const { id, op, request, conditional } = e.data as { id: string; op: 'create' | 'get'; request: string; conditional: boolean };
       const answer = (data: Record<string, unknown>) => window.postMessage({ npw: 'pk-res', id, ...data }, location.origin);
+      window.postMessage({ npw: 'pk-ack', id }, location.origin);
       try {
         const r = await send<{ n?: string; fallback?: boolean }>({ t: 'passkey:begin', op, request, conditional });
         if (r.fallback || !r.n) return answer({ fallback: true });
