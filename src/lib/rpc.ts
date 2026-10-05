@@ -39,6 +39,8 @@ export interface Context {
   user?: string;
   passkeys?: { vault_id: string; item_id: string; passkey_id: string; title: string; user_name: string; reprompt?: boolean }[];
   logins?: Candidate[];
+  /** get with no usable passkey: what the site asked for vs what the vault has (IDs shortened; not secret) */
+  passkeyDiag?: { allowed: string[]; stored: { id: string; discoverable: boolean; user: string; title: string }[] };
 }
 
 export type ContentRequest =

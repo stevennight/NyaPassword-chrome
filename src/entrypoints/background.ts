@@ -550,10 +550,29 @@ async function ctxView(n: string): Promise<Context> {
     view.rpId = c.passkey.op === 'create' ? req.rp?.id ?? npw.displayHost(c.url) : req.rpId ?? npw.displayHost(c.url);
     view.user = c.passkey.op === 'create' ? req.user?.name : undefined;
     view.vaults = vaults;
-    if (c.passkey.op === 'get') view.passkeys = wasmClient().passkeyCandidates({ kind: 'web', origin: c.origin }, c.passkey.request);
+    if (c.passkey.op === 'get') {
+      view.passkeys = wasmClient().passkeyCandidates({ kind: 'web', origin: c.origin }, c.passkey.request);
+      if (!view.passkeys?.length) view.passkeyDiag = await passkeyDiag(req, view.rpId ?? '');
+    }
     else view.logins = await candidates(c.url);
   }
   return view;
+}
+
+/** Why no passkey matched: the credential IDs the site allows vs the vault's passkeys for the RP. */
+async function passkeyDiag(req: { allowCredentials?: { id: string }[] }, rpId: string): Promise<Context['passkeyDiag']> {
+  const short = (id: string) => id.slice(0, 10);
+  const b = await core();
+  const stored: NonNullable<Context['passkeyDiag']>['stored'] = [];
+  for (const v of await b.listItems({})) {
+    if (!v.passkeys || v.deleted) continue;
+    const content = (await b.item(v.vault_id, v.item_id)).content;
+    for (const p of (content?.passkeys ?? []) as { rp_id: string; credential_id: string; discoverable?: boolean; user_name?: string }[]) {
+      if (p.rp_id.toLowerCase() !== rpId.toLowerCase()) continue;
+      stored.push({ id: short(p.credential_id), discoverable: p.discoverable !== false, user: p.user_name ?? '', title: v.title });
+    }
+  }
+  return { allowed: (req.allowCredentials ?? []).map((d) => short(d.id)), stored };
 }
 
 async function finishPasskey(c: Ctx, result: Omit<Extract<ToContent, { t: 'passkey:result' }>, 't' | 'reqId'>) {

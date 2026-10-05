@@ -145,7 +145,24 @@
       {#each ctx.passkeys ?? [] as p (p.passkey_id)}
         <button class="opt" disabled={busy} onclick={() => usePasskey(p)}><b>{p.reprompt ? '🔒 ' : ''}{p.user_name || p.title}</b><span class="faint small">{p.title}</span></button>
       {:else}
-        <p class="small muted">NyaPassword 里没有 {ctx.rpId} 的通行密钥。</p>
+        {@const d = ctx.passkeyDiag}
+        {#if !d?.stored.length}
+          <p class="small muted">NyaPassword 里没有 {ctx.rpId} 的通行密钥。</p>
+        {:else}
+          <p class="small muted">NyaPassword 里有 {d.stored.length} 个 {ctx.rpId} 的通行密钥，但都不是这个网站这次接受的：</p>
+          <details class="small diag" open>
+            <summary>详情</summary>
+            {#if d.allowed.length}
+              <div>网站只接受这些密钥：{d.allowed.join('、')}</div>
+            {:else}
+              <div>网站接受任何“可被发现”的密钥</div>
+            {/if}
+            {#each d.stored as s (s.id)}
+              <div>{s.title} · {s.user || '（无用户名）'} · {s.id}{s.discoverable ? '' : ' · 不可被发现'}</div>
+            {/each}
+            <div class="faint">通常是这些密钥没有登记在要登录的账户上（或已在网站上删除）。可以用“使用其他设备”登录后，在网站上重新创建通行密钥保存到 NyaPassword。</div>
+          </details>
+        {/if}
       {/each}
     </div>
     <div class="acts">
@@ -157,6 +174,8 @@
 </div>
 
 <style>
+  .diag { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; margin-top: 6px; display: flex; flex-direction: column; gap: 3px; word-break: break-all; }
+  .diag summary { cursor: pointer; }
   :global(html), :global(body) { background: transparent; }
   .box { height: 100vh; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
   .h { display: flex; align-items: center; gap: 8px; }
