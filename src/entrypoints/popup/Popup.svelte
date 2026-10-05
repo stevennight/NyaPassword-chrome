@@ -6,7 +6,7 @@
   import { errorText } from '$lib/i18n';
   import TotpCode from '../../../../common/web/src/components/TotpCode.svelte';
   import Logo from '../../../../common/web/src/components/Logo.svelte';
-  import { send, type Candidate } from '../../lib/rpc';
+  import { send, type Candidate, type DesktopStatus } from '../../lib/rpc';
   import { vault } from '$lib/vault.svelte';
 
   let { bridge }: { bridge: Bridge } = $props();
@@ -26,12 +26,73 @@
   let autofillOnLoad = $state(false);
   let lockOnScreenLock = $state(true);
   let neverSave = $state<string[]>([]);
+  // unlock with the desktop app (native messaging)
+  let desk = $state<DesktopStatus | null>(null);
+  let deskBusy = $state(false);
+  let deskMsg = $state('');
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
 
-  onMount(async () => {
-    vault.bridge = bridge; // TotpCode reads vault.bridge
-    tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] ?? null;
-    await refresh();
+  onMount(() => {
+    void (async () => {
+      vault.bridge = bridge; // TotpCode reads vault.bridge
+      tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] ?? null;
+      await refresh();
+      if (lockSt?.signed_in && !lockSt.unlocked) await unlockWithDesktop();
+    })();
+    return () => clearInterval(pollTimer);
   });
+
+  const deskStatus = () => send<DesktopStatus>({ t: 'desktop:status' }).catch(() => null);
+
+  async function unlockWithDesktop() {
+    desk = await deskStatus();
+    if (!desk?.enabled || !desk.paired) return;
+    deskBusy = true;
+    deskMsg = '';
+    try {
+      if (await send<boolean>({ t: 'desktop:unlock' })) await refresh();
+    } catch (err) {
+      const x = err as { code: string; message: string };
+      deskMsg = x.code === 'locked' ? '桌面端已锁定：先解锁桌面端，或在这里输入主密码' : `桌面端解锁不可用：${x.message}`;
+    } finally {
+      deskBusy = false;
+    }
+  }
+
+  /** Runs right in the click: Chrome only asks for a permission during a user gesture. */
+  function toggleDesktop(e: Event) {
+    const on = (e.target as HTMLInputElement).checked;
+    const done = async (enabled: boolean) => {
+      await setOpt('desktopUnlock', enabled);
+      if (!enabled) await send({ t: 'desktop:disconnect' }).catch(() => {});
+      desk = await deskStatus();
+    };
+    if (on) chrome.permissions.request({ permissions: ['nativeMessaging'] }).then(done, () => done(false));
+    else void done(false);
+  }
+
+  async function pair() {
+    deskMsg = '';
+    try {
+      await send<{ code: string }>({ t: 'desktop:pair' });
+      desk = await deskStatus();
+      clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        desk = (await deskStatus()) ?? desk;
+        if (desk?.pairing?.state !== 'pairing') {
+          clearInterval(pollTimer);
+          await refresh();
+        }
+      }, 1000);
+    } catch (err) {
+      deskMsg = (err as { message: string }).message;
+    }
+  }
+
+  async function unpair() {
+    await send({ t: 'desktop:unpair' }).catch(() => {});
+    desk = await deskStatus();
+  }
 
   async function refresh() {
     lockSt = await bridge.lockState();
@@ -105,6 +166,7 @@
     lockOnScreenLock = s.lockOnScreenLock !== false;
     neverSave = (s.neverSave as string[] | undefined) ?? [];
     settingsOpen = !settingsOpen;
+    if (settingsOpen) desk = await deskStatus();
   }
 
   const setOpt = (key: string, value: unknown) => chrome.storage.local.set({ [key]: value });
@@ -138,6 +200,27 @@
           <div class="row never"><span class="grow small">{o}</span><button class="btn ghost sm" onclick={() => allowSave(o)}>移除</button></div>
         {/each}
       {/if}
+      <label class="opt"><input type="checkbox" checked={desk?.enabled ?? false} onchange={toggleDesktop} />
+        <span>由桌面端解锁<span class="faint small">NyaPassword 桌面端已解锁时，扩展无需主密码即可解锁；桌面端锁定时扩展也锁定</span></span></label>
+      {#if desk?.enabled}
+        <div class="desk small">
+          <div class="row"><span class="faint">扩展 ID</span><span class="mono grow id">{desk.extensionId}</span>
+            <button class="btn ghost sm" onclick={() => navigator.clipboard.writeText(desk!.extensionId).then(() => flash('已复制扩展 ID'))}>复制</button></div>
+          <div class="faint">先在桌面端“设置 → 浏览器扩展联动”里填入这个 ID 并开启，再点“与桌面端配对”。</div>
+          {#if desk.pairing?.state === 'pairing'}
+            <div class="code mono">{desk.pairing.code}</div>
+            <div>请在桌面端弹出的窗口中确认同样的数字。</div>
+          {:else if desk.paired}
+            <div class="row"><span class="grow">已配对{desk.desktopUnlocked === true ? ' · 桌面端已解锁' : desk.desktopUnlocked === false ? ' · 桌面端已锁定' : ''}</span>
+              <button class="btn ghost sm" onclick={unpair}>取消配对</button></div>
+          {:else}
+            <button class="btn sm" onclick={pair}>与桌面端配对</button>
+          {/if}
+          {#if desk.pairing?.state === 'error'}<div class="banner bad small">配对失败：{desk.pairing.error}</div>{/if}
+          {#if desk.error && desk.pairing?.state !== 'pairing'}<div class="faint">{desk.error}</div>{/if}
+          {#if deskMsg}<div class="banner bad small">{deskMsg}</div>{/if}
+        </div>
+      {/if}
       <div class="faint small">自动锁定时间等其他设置在密码库的“设置”里。</div>
     </div>
   {/if}
@@ -156,6 +239,10 @@
       <input class="input" type="password" bind:value={password} placeholder="主密码" autofocus />
       <button class="btn primary wide" disabled={busy || !password}>{busy ? '解锁中…' : '解锁'}</button>
       {#if error}<div class="banner bad small">{error}</div>{/if}
+      {#if desk?.enabled && desk.paired}
+        <button type="button" class="btn ghost sm" disabled={deskBusy} onclick={unlockWithDesktop}>{deskBusy ? '正在通过桌面端解锁…' : '用桌面端解锁'}</button>
+        {#if deskMsg}<div class="faint small">{deskMsg}</div>{/if}
+      {/if}
     </form>
   {:else}
     <input class="input" bind:value={q} oninput={search} placeholder="搜索全部条目（支持拼音）" />
@@ -222,6 +309,9 @@
   .settings .opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
   .settings .opt span { display: flex; flex-direction: column; gap: 2px; }
   .never { gap: 6px; word-break: break-all; }
+  .desk { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; }
+  .desk .id { word-break: break-all; font-size: 11.5px; }
+  .desk .code { font-size: 26px; letter-spacing: 5px; text-align: center; background: var(--surface); border-radius: 8px; padding: 4px; }
   footer { border-top: 1px solid var(--border); padding-top: 6px; }
   .toast { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); background: var(--text); color: var(--surface); font-size: 12.5px; padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
 </style>

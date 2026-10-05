@@ -54,7 +54,25 @@ export type PageRequest =
   | { t: 'ctx:passkey'; n: string; choice: { vault_id: string; item_id: string; passkey_id?: string } | { create: true; vault_id: string; target?: { vault_id: string; item_id: string } } }
   | { t: 'ctx:cancel'; n: string; fallback?: boolean }
   | { t: 'popup:fill'; tabId: number; vault_id: string; item_id: string }
-  | { t: 'popup:candidates'; url: string };
+  | { t: 'popup:candidates'; url: string }
+  | { t: 'desktop:status' }
+  | { t: 'desktop:unlock' }
+  | { t: 'desktop:pair' }
+  | { t: 'desktop:unpair' }
+  | { t: 'desktop:disconnect' };
+
+/** "Unlock with the desktop app" as the popup shows it. */
+export interface DesktopStatus {
+  /** The setting is on and the nativeMessaging permission granted. */
+  enabled: boolean;
+  extensionId: string;
+  paired: boolean;
+  connected: boolean;
+  /** null: could not ask the desktop app. */
+  desktopUnlocked: boolean | null;
+  pairing: { code: string; state: 'pairing' | 'paired' | 'error'; error: string } | null;
+  error: string;
+}
 
 export type ToContent =
   | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string; profile?: Record<string, string> }

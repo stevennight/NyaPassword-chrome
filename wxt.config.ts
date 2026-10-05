@@ -24,6 +24,8 @@ export default defineConfig({
     version_name: version,
     minimum_chrome_version: '120',
     permissions: ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'idle', 'offscreen', 'webNavigation'],
+    // "unlock with the desktop app": asked for only when the user turns it on (popup ⚙)
+    optional_permissions: ['nativeMessaging'],
     host_permissions: ['http://*/*', 'https://*/*'],
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
     commands: {

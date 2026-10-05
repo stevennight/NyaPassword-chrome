@@ -6,8 +6,9 @@
 import { createBridge, persistReplica, wasmClient } from '$lib/bridge-wasm';
 import type { Bridge } from '$lib/bridge';
 import * as npw from '../../../common/web/src/wasm/pkg/npw.js';
-import type { Candidate, Context, ContentRequest, PageRequest, Reply, ToContent } from '../lib/rpc';
+import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, ToContent } from '../lib/rpc';
 import { b64, unb64 } from '../lib/rpc';
+import { clearPairing, DesktopPort, generatePairingKey, HOST_NAME, loadPairing, pairingCode, rawPublicKey, requestAccountKey, savePairing, type Pairing } from '../lib/desktop-link';
 
 interface Ctx {
   kind: Context['kind'];
@@ -138,7 +139,89 @@ async function connectEvents() {
   }
 }
 
+// ---------------------------------------------------------------- the desktop app (native messaging)
 
+// The port stays open once used, so the desktop app can tell us when it locks.
+const desktop = new DesktopPort(
+  () => chrome.runtime.connectNative(HOST_NAME),
+  (type) => void onDesktopEvent(type),
+  () => chrome.runtime.lastError?.message ?? '',
+);
+let pairState: DesktopStatus['pairing'] = null;
+
+async function desktopEnabled(): Promise<boolean> {
+  const { desktopUnlock: on } = await chrome.storage.local.get('desktopUnlock');
+  return on === true && (await chrome.permissions.contains({ permissions: ['nativeMessaging'] }));
+}
+
+async function onDesktopEvent(type: string) {
+  const st = await (await core()).lockState();
+  if (type === 'locked' && st.unlocked) await doLock('desktop app locked');
+  if (type === 'unlocked' && !st.unlocked) await desktopUnlock().catch(() => {});
+}
+
+/** Unlocks with the desktop app when it is paired and unlocked; whether it did. */
+async function desktopUnlock(): Promise<boolean> {
+  if (!(await desktopEnabled())) return false;
+  const st = await (await core()).lockState();
+  if (!st.signed_in) return false;
+  if (st.unlocked) return true;
+  const p = await loadPairing();
+  if (!p?.paired || p.accountId !== st.account_id) return false;
+  const ak = await requestAccountKey(desktop, p);
+  try {
+    wasmClient().unlockWithKey(ak);
+  } finally {
+    ak.fill(0);
+  }
+  await onUnlocked();
+  return true;
+}
+
+async function desktopPair(): Promise<{ code: string }> {
+  if (!(await desktopEnabled())) throw { code: 'invalid', message: '请先打开“由桌面端解锁”' };
+  const st = await (await core()).lockState();
+  if (!st.signed_in) throw { code: 'not_signed_in', message: '请先登录账户' };
+  const kp = await generatePairingKey();
+  const pub = await rawPublicKey(kp.publicKey);
+  const pairing: Pairing = { id: crypto.randomUUID(), privateKey: kp.privateKey, publicKey: pub, accountId: st.account_id, serverUrl: st.server_url, paired: false };
+  await savePairing(pairing);
+  const code = await pairingCode(pub);
+  pairState = { code, state: 'pairing', error: '' };
+  const browser = navigator.userAgent.includes('Edg/') ? 'Edge' : 'Chrome';
+  // the desktop app answers once the user decided (or after its two-minute timeout)
+  void desktop
+    .request({ type: 'pair', id: pairing.id, public_key: b64(pub), account_id: st.account_id, server_url: st.server_url, browser }, 150_000)
+    .then(async (r) => {
+      if (r.type === 'paired') {
+        await savePairing({ ...pairing, paired: true });
+        pairState = { code, state: 'paired', error: '' };
+        await desktopUnlock().catch(() => {});
+      } else {
+        pairState = { code, state: 'error', error: String(r.message ?? r.code) };
+      }
+    });
+  return { code };
+}
+
+async function desktopStatus(): Promise<DesktopStatus> {
+  const enabled = await desktopEnabled();
+  const p = await loadPairing().catch(() => null);
+  let desktopUnlocked: boolean | null = null;
+  if (enabled && p?.paired && pairState?.state !== 'pairing') {
+    const r = await desktop.request({ type: 'hello' }, 3000);
+    if (r.type === 'hello') desktopUnlocked = r.unlocked === true;
+  }
+  return { enabled, extensionId: chrome.runtime.id, paired: !!p?.paired, connected: desktop.connected, desktopUnlocked, pairing: pairState, error: desktopUnlocked === null ? desktop.lastError : '' };
+}
+
+async function desktopUnpair() {
+  const p = await loadPairing().catch(() => null);
+  if (p?.paired && (await desktopEnabled())) await desktop.request({ type: 'unpair', pairing_id: p.id }, 3000);
+  await clearPairing();
+  desktop.close();
+  pairState = null;
+}
 
 // ---------------------------------------------------------------- clipboard
 
@@ -360,7 +443,9 @@ async function ctxView(n: string): Promise<Context> {
   const c = contexts.get(n);
   if (!c) throw { code: 'not_found', message: '这个提示已过期' };
   const b = await core();
-  const st = await b.lockState();
+  let st = await b.lockState();
+  // locked: an unlocked desktop app can unlock us without the master password
+  if (st.signed_in && !st.unlocked && (await desktopUnlock().catch(() => false))) st = await b.lockState();
   const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), topHost: c.topHost, signedIn: st.signed_in, locked: !st.unlocked };
   if (!st.unlocked) return view;
   const vaults = (await b.vaults()).map((v) => ({ id: v.id, name: v.name }));
@@ -491,6 +576,19 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       return fillTab(msg.tabId, msg.vault_id, msg.item_id);
     case 'popup:candidates':
       return candidates(msg.url);
+    case 'desktop:status':
+      return desktopStatus();
+    case 'desktop:unlock':
+      return desktopUnlock().catch((e) => {
+        throw { code: e?.code ?? 'invalid', message: e?.message ?? String(e) };
+      });
+    case 'desktop:pair':
+      return desktopPair();
+    case 'desktop:unpair':
+      return desktopUnpair();
+    case 'desktop:disconnect':
+      desktop.close();
+      return true;
   }
 }
 
@@ -567,7 +665,7 @@ function registerListeners() {
     if (msg.t?.startsWith('offscreen:')) return false;
     const page = isExtensionPage(sender);
     const run = async () => {
-      if (msg.t === 'call' || msg.t.startsWith('ctx:') || msg.t.startsWith('popup:')) {
+      if (msg.t === 'call' || msg.t.startsWith('ctx:') || msg.t.startsWith('popup:') || msg.t.startsWith('desktop:')) {
         if (!page) throw { code: 'forbidden', message: 'not allowed from web pages' };
           return fromPage(msg as PageRequest);
       }
