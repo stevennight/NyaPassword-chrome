@@ -204,6 +204,19 @@ try {
     return t && !t.startsWith('created:') ? t : undefined;
   });
   check('passkey sign-in verified by the RP', asserted.startsWith('VERIFIED'), asserted);
+
+  // like Google's sign-in challenge: the call comes from a hidden about:blank frame;
+  // the prompt must still show, in the top frame
+  await rp.evaluate(() => (document.getElementById('out').textContent = ''));
+  await rp.click('#get-blank');
+  const pBlank = await waitFor(async () => rp.frames().find((f) => f.url().includes('/prompt.html') && !f.isDetached() && f.parentFrame() === rp.mainFrame()), 8000).catch(() => null);
+  if (pBlank) {
+    await pBlank.waitForSelector('button.opt');
+    await rp.waitForTimeout(400);
+    await pBlank.click('button.opt');
+  }
+  const assertedBlank = await waitFor(async () => (await rp.textContent('#out')) || undefined, 10000).catch(() => '');
+  check('passkey from a hidden about:blank frame: prompt in the top frame, RP verifies', !!pBlank && assertedBlank.startsWith('VERIFIED'), assertedBlank || 'no prompt');
   const withPasskey = (await rpc('listItems', {})).find((i) => i.passkeys > 0);
   check('passkey stored in the vault', !!withPasskey, withPasskey?.title);
 

@@ -8,9 +8,14 @@ export default defineContentScript({
   world: 'MAIN',
   runAt: 'document_start',
   allFrames: true,
+  // about:blank / blob: frames inherit the page's origin; some sites (Google's
+  // sign-in challenge) call WebAuthn from such a frame
+  matchAboutBlank: true,
+  matchOriginAsFallback: true,
   main() {
     const creds = navigator.credentials;
     if (!creds || !window.PublicKeyCredential) return;
+    const target = location.origin === 'null' ? '*' : location.origin;
     const origCreate = creds.create.bind(creds);
     const origGet = creds.get.bind(creds);
 
@@ -72,10 +77,10 @@ export default defineContentScript({
         signal?.addEventListener('abort', () => {
           done();
           // the site gave up (timeout, another method): close our prompt too
-          window.postMessage({ npw: 'pk-abort', id }, location.origin);
+          window.postMessage({ npw: 'pk-abort', id }, target);
           reject(signal.reason instanceof DOMException ? signal.reason : new DOMException('The operation was aborted.', 'AbortError'));
         });
-        window.postMessage({ npw: 'pk-req', id, op, request, conditional }, location.origin);
+        window.postMessage({ npw: 'pk-req', id, op, request, conditional }, target);
       });
     }
 

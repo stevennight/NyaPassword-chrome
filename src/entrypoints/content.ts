@@ -29,7 +29,6 @@ export default defineContentScript({
     let hello: Promise<void> = Promise.resolve();
     let filledAt = 0;
     const frames = new Map<string, { el: HTMLIFrameElement; kind: 'menu' | 'prompt'; opened: number }>();
-    const pendingPasskeys = new Map<string, string>(); // reqId(nonce) -> page request id
 
     function ensureHost() {
       if (host?.isConnected && shadow) return shadow;
@@ -281,42 +280,17 @@ export default defineContentScript({
 
     // ------------------------------------------------------------ passkeys (from the page-world script)
 
-    window.addEventListener('message', async (e) => {
-      if (e.source !== window || !e.data) return;
-      if (e.data.npw === 'pk-abort') {
-        for (const [n, pageId] of pendingPasskeys) {
-          if (pageId !== e.data.id) continue;
-          pendingPasskeys.delete(n);
-          closeFrame(n);
-        }
-        return;
-      }
-      if (e.data.npw !== 'pk-req') return;
-      const { id, op, request, conditional } = e.data as { id: string; op: 'create' | 'get'; request: string; conditional: boolean };
-      const answer = (data: Record<string, unknown>) => window.postMessage({ npw: 'pk-res', id, ...data }, location.origin);
-      window.postMessage({ npw: 'pk-ack', id }, location.origin);
-      try {
-        const r = await send<{ n?: string; fallback?: boolean }>({ t: 'passkey:begin', op, request, conditional });
-        if (r.fallback || !r.n) return answer({ fallback: true });
-        pendingPasskeys.set(r.n, id);
-        openPrompt(r.n);
-      } catch {
-        answer({ fallback: true });
-      }
-    });
+    // requests are relayed by passkey-relay.content.ts (any frame); the
+    // service worker asks the top frame to show the prompt
 
     // ------------------------------------------------------------ from the service worker
 
-    browser.runtime.onMessage.addListener((msg: ToContent) => {
+    browser.runtime.onMessage.addListener((msg: ToContent, _sender: unknown, sendResponse: (r: unknown) => void) => {
       if (msg.t === 'fill') fill(msg);
       if (msg.t === 'close') closeFrame(msg.n);
-      if (msg.t === 'passkey:result') {
-        const id = pendingPasskeys.get(msg.reqId);
-        closeFrame(msg.reqId);
-        if (id) {
-          pendingPasskeys.delete(msg.reqId);
-          window.postMessage({ npw: 'pk-res', id, response: msg.response, error: msg.error, fallback: msg.fallback }, location.origin);
-        }
+      if (msg.t === 'show:prompt' && window === window.top) {
+        openPrompt(msg.n);
+        sendResponse(true);
       }
     });
 

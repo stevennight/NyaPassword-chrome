@@ -427,7 +427,9 @@ async function updateBadge(tabId: number, url?: string) {
 
 async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSender): Promise<unknown> {
   const tabId = sender.tab?.id;
-  const url = sender.url ?? '';
+  // about:blank / blob: frames report their inherited web origin (passkeys only)
+  const inherited = !/^https?:/.test(sender.url ?? '') && /^https?:\/\//.test(sender.origin ?? '') && (msg.t === 'passkey:begin' || msg.t === 'passkey:abort');
+  const url = inherited ? `${sender.origin}/` : (sender.url ?? '');
   const origin = sender.origin ?? new URL(url).origin;
   if (tabId === undefined || !/^https?:/.test(url)) throw { code: 'forbidden', message: 'not a web page' };
   const b = await core();
@@ -487,7 +489,17 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       const n = nonce();
       contexts.set(n, { kind: 'passkey', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), passkey: { op: msg.op, request: msg.request, reqId: n } });
       await saveContexts();
+      // the prompt goes to the top frame: the requesting frame may be hidden
+      void showPromptInTop(tabId, n);
       return { n };
+    }
+    case 'passkey:abort': {
+      const c = contexts.get(msg.n);
+      if (!c?.passkey || c.tabId !== tabId || c.frameId !== (sender.frameId ?? 0)) return false;
+      contexts.delete(msg.n);
+      await saveContexts();
+      await chrome.tabs.sendMessage(tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: 0 }).catch(() => {});
+      return true;
     }
   }
 }
@@ -546,6 +558,23 @@ async function ctxView(n: string): Promise<Context> {
 
 async function finishPasskey(c: Ctx, result: Omit<Extract<ToContent, { t: 'passkey:result' }>, 't' | 'reqId'>) {
   await chrome.tabs.sendMessage(c.tabId, { t: 'passkey:result', reqId: c.passkey!.reqId, ...result } satisfies ToContent, { frameId: c.frameId }).catch(() => {});
+  await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: c.passkey!.reqId } satisfies ToContent, { frameId: 0 }).catch(() => {});
+}
+
+/** Asks the top frame's content script to show a prompt; it may still be loading (document_idle). */
+async function showPromptInTop(tabId: number, n: string) {
+  for (let i = 0; i < 40; i++) {
+    const shown = await chrome.tabs.sendMessage(tabId, { t: 'show:prompt', n } satisfies ToContent, { frameId: 0 }).catch(() => false);
+    if (shown === true || !contexts.has(n)) return;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  // no top frame to show it in: let the browser handle the request
+  const c = contexts.get(n);
+  if (c?.passkey) {
+    await finishPasskey(c, { fallback: true });
+    contexts.delete(n);
+    await saveContexts();
+  }
 }
 
 const BINARY_ARGS: Record<string, number[]> = { addAttachment: [4], importPreview: [1] };
@@ -669,7 +698,7 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:cancel': {
       const c = contexts.get(msg.n);
       if (c?.passkey) await finishPasskey(c, msg.fallback ? { fallback: true } : { error: { name: 'NotAllowedError', message: 'The user cancelled' } });
-      if (c) await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: c.frameId }).catch(() => {});
+      if (c) await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: c.passkey ? 0 : c.frameId }).catch(() => {});
       contexts.delete(msg.n);
       await saveContexts();
       return true;

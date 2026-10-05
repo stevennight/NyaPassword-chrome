@@ -47,7 +47,8 @@ export type ContentRequest =
   | { t: 'save:capture'; username: string; password: string }
   | { t: 'hello' }
   | { t: 'autofill:load' }
-  | { t: 'passkey:begin'; op: 'create' | 'get'; request: string; conditional: boolean };
+  | { t: 'passkey:begin'; op: 'create' | 'get'; request: string; conditional: boolean }
+  | { t: 'passkey:abort'; n: string };
 
 export type PageRequest =
   | { t: 'call'; m: string; a: unknown[] }
