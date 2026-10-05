@@ -75,7 +75,6 @@
     }
   }
 
-  /** Runs right in the click: Chrome only asks for a permission during a user gesture. */
   function toggleDesktop(e: Event) {
     const on = (e.target as HTMLInputElement).checked;
     const done = async (enabled: boolean) => {
@@ -83,8 +82,7 @@
       if (!enabled) await send({ t: 'desktop:disconnect' }).catch(() => {});
       desk = await deskStatus();
     };
-    if (on) chrome.permissions.request({ permissions: ['nativeMessaging'] }).then(done, () => done(false));
-    else void done(false);
+    void done(on);
   }
 
   async function pair() {

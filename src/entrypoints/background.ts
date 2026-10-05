@@ -168,7 +168,7 @@ let pairState: DesktopStatus['pairing'] = null;
 
 async function desktopEnabled(): Promise<boolean> {
   const { desktopUnlock: on } = await chrome.storage.local.get('desktopUnlock');
-  return on === true && (await chrome.permissions.contains({ permissions: ['nativeMessaging'] }));
+  return on === true && typeof chrome.runtime.connectNative === 'function';
 }
 
 async function onDesktopEvent(type: string) {

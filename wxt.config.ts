@@ -23,9 +23,10 @@ export default defineConfig({
     version: manifestVersion(version),
     version_name: version,
     minimum_chrome_version: '120',
-    permissions: ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'idle', 'offscreen', 'webNavigation'],
-    // "unlock with the desktop app": asked for only when the user turns it on (popup ⚙)
-    optional_permissions: ['nativeMessaging'],
+    // nativeMessaging ("unlock with the desktop app") must be a required
+    // permission: Chrome binds runtime.connectNative only when the service
+    // worker starts, so an optional permission granted later leaves it missing
+    permissions: ['storage', 'unlimitedStorage', 'tabs', 'alarms', 'idle', 'offscreen', 'webNavigation', 'nativeMessaging'],
     host_permissions: ['http://*/*', 'https://*/*'],
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
     commands: {
