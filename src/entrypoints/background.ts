@@ -11,7 +11,7 @@
 import { createBridge, persistReplica, wasmClient } from '$lib/bridge-wasm';
 import type { Bridge } from '$lib/bridge';
 import * as npw from '../../../common/web/src/wasm/pkg/npw.js';
-import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, ToContent } from '../lib/rpc';
+import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, SaveEdit, ToContent } from '../lib/rpc';
 import { b64, unb64 } from '../lib/rpc';
 import { clearPairing, DesktopPort, generatePairingKey, HOST_NAME, loadPairing, pairingCode, rawPublicKey, requestAccountKey, savePairing, type Pairing } from '../lib/desktop-link';
 import { DesktopUnlocker } from '../lib/desktop-unlock';
@@ -35,6 +35,8 @@ interface Ctx extends Verifiable {
   explicit?: boolean;
   /** this menu already asked the desktop app */
   desktopAsked?: boolean;
+  /** the frame that shows the menu / prompt, when not the default (see `shownIn`) */
+  menuFrame?: number;
 }
 
 let bridge: Bridge | null = null;
@@ -88,6 +90,22 @@ function site(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** The frame whose content script shows the context's iframe: a menu in its field's frame (or the top frame, `inline:show`), prompts in the top frame. */
+function shownIn(c: Ctx): number {
+  return c.menuFrame ?? (c.kind === 'fill' ? c.frameId : 0);
+}
+
+/**
+ * A menu the top frame shows for a field in a subframe: the subframe cannot
+ * check that it is visible, so the top frame is asked before filling.
+ */
+async function requireVisibleMenu(c: Ctx, n: string) {
+  const at = shownIn(c);
+  if (at === c.frameId) return; // the field's frame checks its own menu
+  const ok = await chrome.tabs.sendMessage(c.tabId, { t: 'menu:trusted', n } satisfies ToContent, { frameId: at }).catch(() => false);
+  if (ok !== true) throw { code: 'forbidden', message: '菜单被遮挡，请重新打开' };
 }
 
 /** A frame of another site than the tab's top page (design doc §10.4: warn, never fill by itself). */
@@ -452,6 +470,32 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       const count = st.unlocked ? (isProfile(msg.fieldKind) ? await profileCandidates(msg.fieldKind) : await candidates(url)).length : -1;
       return { n, count, crossSite: cross };
     }
+    case 'inline:show': {
+      // a subframe's menu goes to the top frame, where the subframe's size cannot clip it
+      const c = contexts.get(msg.n);
+      const frameId = sender.frameId ?? 0;
+      if (!c || c.kind !== 'fill' || c.tabId !== tabId || c.frameId !== frameId || frameId === 0) return false;
+      const r = msg.rect;
+      if (![r?.left, r?.top, r?.right, r?.bottom].every((v) => Number.isFinite(v))) return false;
+      c.menuFrame = 0;
+      await saveContexts();
+      const shown = await chrome.tabs.sendMessage(tabId, { t: 'show:menu', n: msg.n, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } } satisfies ToContent, { frameId: 0 }).catch(() => false);
+      if (shown !== true) {
+        delete c.menuFrame;
+        await saveContexts();
+      }
+      return shown === true;
+    }
+    case 'inline:close': {
+      // closed in one of the two frames: tell the other one
+      const c = contexts.get(msg.n);
+      const frameId = sender.frameId ?? 0;
+      if (!c || c.tabId !== tabId || c.kind !== 'fill') return false;
+      const at = shownIn(c);
+      if (at === c.frameId || (frameId !== at && frameId !== c.frameId)) return false;
+      await chrome.tabs.sendMessage(tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: frameId === at ? c.frameId : at }).catch(() => {});
+      return true;
+    }
     case 'save:capture': {
       if (!st.signed_in || !msg.password) return null;
       const never = ((await chrome.storage.local.get('neverSave')).neverSave as string[] | undefined) ?? [];
@@ -472,6 +516,11 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       await saveContexts();
       // the page may navigate away right after submitting: the next page of the site shows it
       pendingPrompt.set(tabId, { n, site: site(url), expires: Date.now() + 30_000 });
+      // a subframe (often a small embedded login box) would clip the prompt: the top frame shows it
+      if ((sender.frameId ?? 0) !== 0) {
+        void showPromptInTop(tabId, n);
+        return null;
+      }
       return { n };
     }
     case 'autofill:load': {
@@ -537,12 +586,19 @@ async function ctxView(n: string): Promise<Context> {
   if (c.kind === 'save' && c.capture) {
     const list = await candidates(c.url);
     let updateTitle: string | undefined;
+    let target = '';
+    const targets: NonNullable<Context['targets']> = [];
     for (const cand of list) {
+      // never offered for update through a page's form submission
       if (cand.reprompt) continue;
       const creds = await credentialsFor(c.url, cand.vault_id, cand.item_id).catch(() => null);
-      if (creds?.username === c.capture.username) updateTitle = cand.title;
+      targets.push({ vault_id: cand.vault_id, item_id: cand.item_id, title: cand.title, username: creds?.username ?? cand.username });
+      if (creds?.username === c.capture.username && !target) {
+        updateTitle = cand.title;
+        target = `${cand.vault_id}|${cand.item_id}`;
+      }
     }
-    Object.assign(view, { offer: updateTitle ? 'update' : 'new', username: c.capture.username, updateTitle, vaults });
+    Object.assign(view, { offer: updateTitle ? 'update' : 'new', username: c.capture.username, password: c.capture.password, updateTitle, target, targets, vaults });
   }
   if (c.kind === 'passkey' && c.passkey) {
     const req = JSON.parse(c.passkey.request);
@@ -644,6 +700,7 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
         if (c.fieldKind === 'card' && !secureContext(c.url)) throw { code: 'forbidden', message: '这个页面没有加密（http），不填写银行卡' };
         const choice = (await profileCandidates(c.fieldKind!)).find((x) => x.vault_id === msg.vault_id && x.item_id === msg.item_id);
         if (!choice) throw { code: 'forbidden', message: 'not a matching item' };
+        await requireVisibleMenu(c, msg.n);
         await requireVerified(c, choice);
         const profile = await profileValues(c.fieldKind!, msg.vault_id, msg.item_id);
         await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, profile } satisfies ToContent, { frameId: c.frameId });
@@ -651,6 +708,7 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       }
       const choice = (await candidates(c.url)).find((x) => x.vault_id === msg.vault_id && x.item_id === msg.item_id);
       if (!choice) throw { code: 'forbidden', message: 'this item is not saved for this site' };
+      await requireVisibleMenu(c, msg.n);
       await requireVerified(c, choice);
       const creds = await credentialsFor(c.url, msg.vault_id, msg.item_id);
       await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, ...creds } satisfies ToContent, { frameId: c.frameId });
@@ -659,6 +717,7 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:generate': {
       const c = contexts.get(msg.n);
       if (!c) throw { code: 'not_found', message: 'expired' };
+      await requireVisibleMenu(c, msg.n);
       const g = npw.generate({ kind: 'random', length: 20, upper: true, lower: true, digits: true, symbols: true, avoid_ambiguous: true }) as { password: string };
       c.generated = g.password;
       await saveContexts();
@@ -672,11 +731,17 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
         const never = ((await chrome.storage.local.get('neverSave')).neverSave as string[] | undefined) ?? [];
         await chrome.storage.local.set({ neverSave: [...new Set([...never, c.origin])] });
       } else {
-        await saveCapture(c, msg.vault_id);
+        await saveCapture(c, msg.vault_id, msg.edit);
       }
       contexts.delete(msg.n);
       await saveContexts();
-      await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: c.frameId }).catch(() => {});
+      await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: shownIn(c) }).catch(() => {});
+      return true;
+    }
+    case 'ctx:resize': {
+      const c = contexts.get(msg.n);
+      if (!c || !Number.isFinite(msg.h)) return false;
+      await chrome.tabs.sendMessage(c.tabId, { t: 'resize', n: msg.n, h: msg.h } satisfies ToContent, { frameId: shownIn(c) }).catch(() => {});
       return true;
     }
     case 'ctx:passkey': {
@@ -717,7 +782,7 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:cancel': {
       const c = contexts.get(msg.n);
       if (c?.passkey) await finishPasskey(c, msg.fallback ? { fallback: true } : { error: { name: 'NotAllowedError', message: 'The user cancelled' } });
-      if (c) await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: c.passkey ? 0 : c.frameId }).catch(() => {});
+      if (c) await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: shownIn(c) }).catch(() => {});
       contexts.delete(msg.n);
       await saveContexts();
       return true;
@@ -764,26 +829,46 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
   }
 }
 
-async function saveCapture(c: Ctx, vaultId?: string) {
-  const b = await core();
+async function saveCapture(c: Ctx, vaultId?: string, edit?: SaveEdit) {
+  if (edit) {
+    // what the user checked / changed in the prompt
+    if (typeof edit.username !== 'string' || typeof edit.password !== 'string' || !edit.password) throw { code: 'invalid', message: '密码不能为空' };
+    const cap = { username: edit.username, password: edit.password };
+    if (edit.target) {
+      const t = edit.target;
+      // only this site's logins, never a "使用前需要验证" one (the prompt does not offer them)
+      const cand = (await candidates(c.url)).find((x) => x.vault_id === t.vault_id && x.item_id === t.item_id && !x.reprompt);
+      if (!cand) throw { code: 'forbidden', message: '这个条目不能从这里更新' };
+      return updateLogin(cand.vault_id, cand.item_id, cap, true);
+    }
+    return newLogin(c, cap, vaultId, edit.title);
+  }
   const cap = c.capture!;
-  const list = await candidates(c.url);
-  for (const cand of list) {
+  for (const cand of await candidates(c.url)) {
     // never changed through a page's form submission (the prompt did not offer it)
     if (cand.reprompt) continue;
     const creds = await credentialsFor(c.url, cand.vault_id, cand.item_id).catch(() => null);
-    if (creds?.username === cap.username) {
-      const view = await b.item(cand.vault_id, cand.item_id);
-      const content = view.content!;
-      const pw = content.fields.find((f) => f.purpose === 'password');
-      if (pw) pw.value = cap.password;
-      await b.saveItem(cand.vault_id, cand.item_id, content);
-      void doSync();
-      return;
-    }
+    if (creds?.username === cap.username) return updateLogin(cand.vault_id, cand.item_id, cap, false);
   }
+  return newLogin(c, cap, vaultId);
+}
+
+/** A new password (the old one goes to the item's history) and, when the user chose it in the prompt, a new username. */
+async function updateLogin(vaultId: string, itemId: string, cap: { username: string; password: string }, setUsername: boolean) {
+  const b = await core();
+  const content = (await b.item(vaultId, itemId)).content!;
+  const pw = content.fields.find((f) => f.purpose === 'password');
+  if (pw) pw.value = cap.password;
+  const user = content.fields.find((f) => f.purpose === 'username');
+  if (setUsername && user && user.value !== cap.username) user.value = cap.username;
+  await b.saveItem(vaultId, itemId, content);
+  void doSync();
+}
+
+async function newLogin(c: Ctx, cap: { username: string; password: string }, vaultId?: string, title?: string) {
+  const b = await core();
   const content = await b.newItem('login');
-  content.title = npw.displayHost(c.url);
+  content.title = title?.trim() || npw.displayHost(c.url);
   const user = content.fields.find((f) => f.purpose === 'username');
   const pw = content.fields.find((f) => f.purpose === 'password');
   if (user) user.value = cap.username;

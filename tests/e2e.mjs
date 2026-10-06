@@ -303,6 +303,37 @@ try {
   const warned = warnMenu ? await warnMenu.waitForSelector('.warn', { timeout: 5000 }).then(() => true).catch(() => false) : false;
   check('cross-site frame: menu not opened by itself, warning when opened', !autoOpened && warned, `auto=${autoOpened} menu=${!!warnMenu} warned=${warned}`);
 
+  // ---- the subframe's menu is shown by the top frame (the frame's size cannot clip it), in the top layer
+  check('subframe menu shown in the top frame', warnMenu?.parentFrame() === framed.mainFrame(), warnMenu?.parentFrame()?.url());
+  check('our elements are in the top layer', await framed.evaluate(() => document.querySelector('[data-nyapassword]')?.matches(':popover-open') === true));
+  if (warnMenu) {
+    await framed.waitForTimeout(400); // the menu ignores clicks right after it opens (anti-clickjacking)
+    await warnMenu.click('button.opt:has-text("alice@example.com")');
+    const remoteFilled = await waitFor(async () => ((await inner.inputValue('#pwd')) === 'new-password-2' ? true : undefined), 8000).catch(() => false);
+    check('the top frame menu fills the subframe', remoteFilled && (await inner.inputValue('#account')) === 'alice@example.com');
+    check('the menu closes after filling', await waitFor(async () => (framed.frames().some((f) => f.url().includes('/inline.html') && !f.isDetached()) ? undefined : true), 5000).catch(() => false));
+  }
+
+  // ---- a login submitted in a subframe: the prompt in the top frame, values edited before saving
+  await inner.fill('#account', 'erin@example.com');
+  await inner.fill('#pwd', 'framed-typo-4');
+  await inner.click('#go');
+  const editPrompt = await waitFor(async () => framed.frames().find((f) => f.url().includes('/prompt.html') && !f.isDetached()), 8000).catch(() => null);
+  check('subframe save prompt shown in the top frame', editPrompt?.parentFrame() === framed.mainFrame());
+  if (editPrompt) {
+    await editPrompt.waitForSelector('#ps-pass');
+    const shown = { user: await editPrompt.inputValue('#ps-user'), pass: await editPrompt.inputValue('#ps-pass'), target: await editPrompt.inputValue('#ps-target') };
+    check('save prompt shows the submitted values', shown.user === 'erin@example.com' && shown.pass === 'framed-typo-4' && shown.target === '', JSON.stringify(shown));
+    await editPrompt.fill('#ps-title', 'Erin edited');
+    await editPrompt.fill('#ps-user', 'erin@example.org');
+    await editPrompt.fill('#ps-pass', 'framed-pass-5');
+    await editPrompt.click('button.primary');
+    const saved = await waitFor(async () => (await rpc('listItems', {})).find((i) => i.title === 'Erin edited'), 8000).catch(() => null);
+    const fields = saved ? (await rpc('item', saved.vault_id, saved.item_id)).content.fields : [];
+    const val = (purpose) => fields.find((f) => f.purpose === purpose)?.value;
+    check('save prompt saves the edited values', val('username') === 'erin@example.org' && val('password') === 'framed-pass-5', JSON.stringify({ u: val('username'), p: val('password') }));
+  }
+
   // ---- sync reached the server
   const report = await rpc('sync');
   const dev = await rpc('devices');

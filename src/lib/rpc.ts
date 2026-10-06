@@ -33,7 +33,13 @@ export interface Context {
   /** save */
   offer?: 'new' | 'update';
   username?: string;
+  /** save: the submitted password (the prompt shows it masked; the user may edit both before saving) */
+  password?: string;
   updateTitle?: string;
+  /** save: this site's logins the prompt may update instead (never "使用前需要验证" items) */
+  targets?: { vault_id: string; item_id: string; title: string; username: string }[];
+  /** save: the login the offer updates ("vault|item"), '' for a new one */
+  target?: string;
   vaults?: { id: string; name: string }[];
   /** passkey */
   op?: 'create' | 'get';
@@ -45,9 +51,31 @@ export interface Context {
   passkeyDiag?: { allowed: string[]; stored: { id: string; discoverable: boolean; user: string; title: string }[] };
 }
 
+/** A field's box in the top frame's viewport (CSS px). */
+export interface Rect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** What the user changed in the save prompt. */
+export interface SaveEdit {
+  username: string;
+  password: string;
+  /** a new login's title */
+  title?: string;
+  /** update this login of the site instead of saving a new one */
+  target?: { vault_id: string; item_id: string };
+}
+
 export type ContentRequest =
   /** `explicit`: the user clicked the NyaPassword button (may ask the desktop app to unlock). */
   | { t: 'inline:open'; fieldKind: string; isNew: boolean; explicit?: boolean }
+  /** A subframe's menu: shown by the top frame at `rect`, so the subframe's size cannot clip it. */
+  | { t: 'inline:show'; n: string; rect: Rect }
+  /** A menu shown in another frame than its field's was closed (from either frame). */
+  | { t: 'inline:close'; n: string }
   | { t: 'save:capture'; username: string; password: string }
   | { t: 'hello' }
   | { t: 'autofill:load' }
@@ -63,7 +91,9 @@ export type PageRequest =
   | { t: 'ctx:verify'; n: string; vault_id: string; item_id: string; password: string }
   | { t: 'ctx:fill'; n: string; vault_id: string; item_id: string }
   | { t: 'ctx:generate'; n: string }
-  | { t: 'ctx:save'; n: string; vault_id?: string; never?: boolean }
+  | { t: 'ctx:save'; n: string; vault_id?: string; never?: boolean; edit?: SaveEdit }
+  /** The prompt's content height, so its iframe covers no more of the page than needed. */
+  | { t: 'ctx:resize'; n: string; h: number }
   | { t: 'ctx:passkey'; n: string; choice: { vault_id: string; item_id: string; passkey_id?: string } | { create: true; vault_id: string; target?: { vault_id: string; item_id: string } } }
   | { t: 'ctx:cancel'; n: string; fallback?: boolean }
   | { t: 'popup:fill'; tabId: number; vault_id: string; item_id: string }
@@ -98,7 +128,12 @@ export type ToContent =
   | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string; profile?: Record<string, string> }
   | { t: 'close'; n: string }
   | { t: 'passkey:result'; reqId: string; response?: unknown; error?: { name: string; message: string }; fallback?: boolean }
-  | { t: 'show:prompt'; n: string };
+  | { t: 'show:prompt'; n: string }
+  /** top frame: show the menu of a field in a subframe */
+  | { t: 'show:menu'; n: string; rect: Rect }
+  /** top frame: whether that menu is visible (anti-clickjacking), asked before filling the subframe */
+  | { t: 'menu:trusted'; n: string }
+  | { t: 'resize'; n: string; h: number };
 
 export interface Reply<T = unknown> {
   ok: boolean;
