@@ -1,7 +1,7 @@
 {
   "name": "nyapassword-chrome",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "NyaPassword browser extension for Chrome and Edge (Manifest V3)",
   "scripts": {
