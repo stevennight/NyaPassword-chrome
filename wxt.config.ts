@@ -15,6 +15,8 @@ function manifestVersion(v: string): string {
 
 export default defineConfig({
   srcDir: 'src',
+  // WXT resolves publicDir against the project root, not srcDir
+  publicDir: 'src/public',
   modules: ['@wxt-dev/module-svelte'],
   manifestVersion: 3,
   manifest: {
