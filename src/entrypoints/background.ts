@@ -518,7 +518,7 @@ async function ctxView(n: string): Promise<Context> {
   // locked: an unlocked desktop app can unlock us without the master password
   // (not while an interactive request waits: that one answers by itself)
   if (st.signed_in && !st.unlocked && !unlocker.waiting && (await unlocker.unlock(false).catch(() => false))) st = await b.lockState();
-  const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), topHost: c.topHost, signedIn: st.signed_in, locked: !st.unlocked };
+  const view: Context = { kind: c.kind, origin: c.origin, host: npw.displayHost(c.url), topHost: c.topHost, explicit: c.explicit, signedIn: st.signed_in, locked: !st.unlocked };
   if (!st.unlocked) {
     if (st.signed_in && (await desktopPaired(st.account_id))) {
       // the user clicked the NyaPassword button: ask the desktop app (once per menu);

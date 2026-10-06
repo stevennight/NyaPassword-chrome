@@ -22,6 +22,8 @@ export interface Context {
   topHost?: string;
   signedIn: boolean;
   locked: boolean;
+  /** fill: opened by the user's click on the NyaPassword button (not by focusing a field) */
+  explicit?: boolean;
   /** Locked and paired with the desktop app: whether it is being asked to unlock (`ctx:desktop`). */
   desktop?: { waiting: boolean; error: string };
   /** fill: 'username' | 'password' | 'otp' for logins, 'card' | 'identity' for profiles */

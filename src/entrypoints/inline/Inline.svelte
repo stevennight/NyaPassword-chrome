@@ -106,8 +106,9 @@
       <div class="desk">桌面端没有解锁：{ctx.desktop.error}</div>
     {/if}
     <form class="unlock" onsubmit={unlock}>
+      <!-- a menu that opened on field focus must not take the focus from the page -->
       <!-- svelte-ignore a11y_autofocus -->
-      <input type="password" bind:value={password} placeholder="主密码解锁" autofocus />
+      <input type="password" bind:value={password} placeholder="主密码解锁" autofocus={ctx.explicit} />
       <button disabled={busy || !password}>{busy ? '…' : '解锁'}</button>
     </form>
     {#if ctx.desktop && !ctx.desktop.waiting}

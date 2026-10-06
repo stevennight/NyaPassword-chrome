@@ -28,7 +28,7 @@ export default defineContentScript({
     let filling = false;
     let hello: Promise<void> = Promise.resolve();
     let filledAt = 0;
-    const frames = new Map<string, { el: HTMLIFrameElement; kind: 'menu' | 'prompt'; opened: number }>();
+    const frames = new Map<string, { el: HTMLIFrameElement; kind: 'menu' | 'prompt'; opened: number; field?: Element }>();
 
     function ensureHost() {
       if (host?.isConnected && shadow) return shadow;
@@ -96,6 +96,8 @@ export default defineContentScript({
     }
 
     async function openMenu(el: HTMLInputElement | HTMLSelectElement, explicit: boolean) {
+      // focusing the field again (e.g. back from the menu) keeps the open menu
+      if (!explicit && [...frames.values()].some((f) => f.kind === 'menu' && f.field === el && f.el.isConnected)) return;
       const form = loginFormOf(el);
       const profile = form ? undefined : profileOf(el, profiles);
       const fieldKind = profile ? profile.kind : form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
@@ -116,7 +118,7 @@ export default defineContentScript({
       f.style.cssText = `all: initial; position: fixed; left: ${left}px; top: ${below ? rect.bottom + 6 : rect.top - MENU_H - 6}px; width: ${MENU_W}px; height: ${MENU_H}px; border: 0; border-radius: 12px; box-shadow: 0 10px 30px rgba(20,30,60,.22); background: transparent; color-scheme: normal; pointer-events: auto;`;
       f.setAttribute('allowtransparency', 'true');
       ensureHost().appendChild(f);
-      frames.set(r.n, { el: f, kind: 'menu', opened: Date.now() });
+      frames.set(r.n, { el: f, kind: 'menu', opened: Date.now(), field: el });
     }
 
     function openPrompt(n: string) {
