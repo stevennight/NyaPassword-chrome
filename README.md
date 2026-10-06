@@ -42,6 +42,6 @@ node tests\matrix.mjs     # 真实网站登录页的表单识别（只打开页�
 git push origin HEAD v0.1.0
 ```
 
-GitHub Actions 构建 `NyaPassword-Chrome_<版本>.zip`（Chrome 网上应用店和 Edge 外接程序商店共用）并发布 Release；上架商店先手动上传（可设为“不公开”）。manifest 版本由 `VERSION` 换算：正式版 `x.y.z` → `x.y.z.1000`，预发布 `x.y.z-beta.N` → `x.y.z.N`。
+GitHub Actions 构建 `NyaPassword-Chrome_<版本>.zip`（Chrome 网上应用店和 Edge 外接程序商店共用）并发布 Release；上架商店先手动上传（Chrome 设为“不公开”，Edge 设为“隐藏”）。商店填表内容、权限理由、截图和宣传图见 [store/](store/README.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)；图片用 `node scripts/store-assets.mjs` 重新生成（先 `npm run build`）。扩展名称、简介和快捷键说明在 `src/public/_locales`（默认 `zh_CN`，另有 `en`），商店按这些语言分别显示商品页。manifest 版本由 `VERSION` 换算：正式版 `x.y.z` → `x.y.z.1000`，预发布 `x.y.z-beta.N` → `x.y.z.N`。
 
 CI 用两个只读部署密钥检出私有仓库：`COMMON_DEPLOY_KEY`（common）、`SERVER_DEPLOY_KEY`（server，端到端测试用）。
