@@ -1,0 +1,5 @@
+{
+  "extName": { "message": "NyaPassword" },
+  "extDescription": { "message": "Self-hosted, end-to-end encrypted password manager: autofill, passkeys and one-time codes." },
+  "cmdFillLogin": { "message": "Fill the login for the current site" }
+}

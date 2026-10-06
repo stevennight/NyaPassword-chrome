@@ -20,8 +20,10 @@ export default defineConfig({
   modules: ['@wxt-dev/module-svelte'],
   manifestVersion: 3,
   manifest: {
-    name: 'NyaPassword',
-    description: '自建、端到端加密的密码管理器：自动填充、通行密钥、一次性密码。',
+    // strings in src/public/_locales (one store listing per locale)
+    name: '__MSG_extName__',
+    description: '__MSG_extDescription__',
+    default_locale: 'zh_CN',
     version: manifestVersion(version),
     version_name: version,
     minimum_chrome_version: '120',
@@ -32,7 +34,7 @@ export default defineConfig({
     host_permissions: ['http://*/*', 'https://*/*'],
     content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
     commands: {
-      'fill-login': { suggested_key: { default: 'Ctrl+Shift+L', mac: 'Command+Shift+L' }, description: '填写当前网站的登录信息' },
+      'fill-login': { suggested_key: { default: 'Ctrl+Shift+L', mac: 'Command+Shift+L' }, description: '__MSG_cmdFillLogin__' },
     },
     web_accessible_resources: [{ resources: ['inline.html', 'prompt.html', 'chunks/*', 'assets/*'], matches: ['http://*/*', 'https://*/*'] }],
     action: { default_title: 'NyaPassword' },

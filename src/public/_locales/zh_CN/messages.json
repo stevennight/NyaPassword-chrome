@@ -1,0 +1,5 @@
+{
+  "extName": { "message": "NyaPassword" },
+  "extDescription": { "message": "自建、端到端加密的密码管理器：自动填充、通行密钥、一次性密码。" },
+  "cmdFillLogin": { "message": "填写当前网站的登录信息" }
+}
