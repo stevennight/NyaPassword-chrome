@@ -150,4 +150,4 @@ Partner Center：<https://partner.microsoft.com/dashboard/microsoftedge/overview
 ## 上架之后
 
 - Chrome 和 Edge 会各分配一个固定的扩展 ID。把两个 ID 填进桌面端“设置 → 浏览器扩展联动”即可，不再随加载路径变化。
-- 之后发布新版本：上传新的 zip 并提交审核；两家都支持 API 上传，可以接进 release workflow。
+- 之后发布新版本：上传新的 zip 并提交审核。release workflow 可以自动完成（变量 `STORE_PUBLISH`，见 [README](../README.md#发布)）；手动时 Edge 每次都要重新填写认证说明。

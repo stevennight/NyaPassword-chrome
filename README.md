@@ -42,6 +42,16 @@ node tests\matrix.mjs     # 真实网站登录页的表单识别（只打开页�
 git push origin HEAD v0.1.0
 ```
 
-GitHub Actions 构建 `NyaPassword-Chrome_<版本>.zip`（Chrome 网上应用店和 Edge 外接程序商店共用）并发布 Release；上架商店先手动上传（Chrome 设为“不公开”，Edge 设为“隐藏”）。商店填表内容、权限理由、截图和宣传图见 [store/](store/README.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)；图片用 `node scripts/store-assets.mjs` 重新生成（先 `npm run build`）。扩展名称、简介和快捷键说明在 `src/public/_locales`（默认 `zh_CN`，另有 `en`），商店按这些语言分别显示商品页。manifest 版本由 `VERSION` 换算：正式版 `x.y.z` → `x.y.z.1000`，预发布 `x.y.z-beta.N` → `x.y.z.N`。
+GitHub Actions 构建 `NyaPassword-Chrome_<版本>.zip`（Chrome 网上应用店和 Edge 外接程序商店共用）并发布 Release；上架商店先手动上传（Chrome 设为“不公开”，Edge 设为“隐藏”）。
+
+自动提交商店（正式版，预发布不提交）：仓库变量 `STORE_PUBLISH` 设为 `true` 后，release workflow 用 `scripts/publish-stores.mjs` 把 zip 上传到两家商店并提交审核；哪家的密钥没设就跳过哪家。商店接口只能换安装包，商品页、截图、隐私权仍在后台修改。
+
+| 名称 | 类型 | 内容 |
+|---|---|---|
+| `CWS_PUBLISHER_ID`、`CWS_ITEM_ID` | 变量 | Chrome 开发者后台的发布者 ID、扩展 ID |
+| `CWS_SERVICE_ACCOUNT_JSON` | 密钥 | Google Cloud 服务账号的 JSON 密钥（项目里启用 Chrome Web Store API；服务账号在开发者后台“帐号”页添加） |
+| `EDGE_PRODUCT_ID` | 变量 | Partner Center 扩展概览里的 Product ID |
+| `EDGE_CLIENT_ID`、`EDGE_API_KEY` | 密钥 | Partner Center → Publish API（API Key 有有效期，过期后重新生成并更新） |
+| `EDGE_CERTIFICATION_NOTES` | 密钥 | Edge 认证说明全文（含审核用的测试账户；Edge 每次提交都要求填写） |商店填表内容、权限理由、截图和宣传图见 [store/](store/README.md)，隐私政策见 [PRIVACY.md](PRIVACY.md)；图片用 `node scripts/store-assets.mjs` 重新生成（先 `npm run build`）。扩展名称、简介和快捷键说明在 `src/public/_locales`（默认 `zh_CN`，另有 `en`），商店按这些语言分别显示商品页。manifest 版本由 `VERSION` 换算：正式版 `x.y.z` → `x.y.z.1000`，预发布 `x.y.z-beta.N` → `x.y.z.N`。
 
 CI 用两个只读部署密钥检出私有仓库：`COMMON_DEPLOY_KEY`（common）、`SERVER_DEPLOY_KEY`（server，端到端测试用）。
