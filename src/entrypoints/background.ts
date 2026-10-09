@@ -9,6 +9,7 @@
 // (src/lib/reprompt.ts). The shortcut and fill on page load skip them.
 
 import { createBridge, persistReplica, wasmClient } from '$lib/bridge-wasm';
+import { AUTO_LOCK_DEFAULT, parseAutoLock } from '$lib/autolock';
 import type { Bridge } from '$lib/bridge';
 import * as npw from '../../../common/web/src/wasm/pkg/npw.js';
 import type { Candidate, Context, ContentRequest, DesktopStatus, PageRequest, Reply, SaveEdit, ToContent } from '../lib/rpc';
@@ -44,7 +45,8 @@ let ready: Promise<Bridge> | null = null;
 const contexts = new Map<string, Ctx>();
 const pendingPrompt = new Map<number, { n: string; site: string; expires: number }>();
 let ws: WebSocket | null = null;
-let autoLockMinutes = 10;
+/** Idle minutes before locking; 0 = never (set on the vault page's settings, `autolock.ts`). */
+let autoLockMinutes = AUTO_LOCK_DEFAULT;
 /** The popup's verification of a reprompt item (kept in memory only). */
 const popupGrant: Verifiable = {};
 
@@ -64,7 +66,7 @@ function core(): Promise<Bridge> {
       }
       for (const [k, v] of Object.entries((s.contexts as Record<string, Ctx>) ?? {})) contexts.set(k, v);
       const l = await chrome.storage.local.get('autoLock');
-      if (typeof l.autoLock === 'number') autoLockMinutes = l.autoLock;
+      autoLockMinutes = parseAutoLock(l.autoLock) ?? AUTO_LOCK_DEFAULT;
       bridge = b;
       if ((await b.lockState()).unlocked) onUnlocked();
       return b;
@@ -141,7 +143,8 @@ async function doLock(reason = '') {
 }
 
 function touch() {
-  chrome.alarms.create('autolock', { delayInMinutes: autoLockMinutes });
+  if (autoLockMinutes > 0) chrome.alarms.create('autolock', { delayInMinutes: autoLockMinutes });
+  else chrome.alarms.clear('autolock');
 }
 
 async function doSync() {
@@ -664,7 +667,6 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       if (typeof fn !== 'function' || ['copy', 'saveFile'].includes(msg.m)) throw { code: 'invalid', message: `unknown method ${msg.m}` };
       const args = [...msg.a];
       for (const i of BINARY_ARGS[msg.m] ?? []) if (typeof args[i] === 'string') args[i] = unb64(args[i] as string);
-      if (msg.m === 'setAutoLock') return;
       let r = await fn.apply(b, args);
       if (BINARY_RESULT.has(msg.m) && r instanceof Uint8Array) r = b64(r);
       if (['unlock', 'register', 'signIn'].includes(msg.m)) await onUnlocked();
@@ -952,7 +954,11 @@ function registerListeners() {
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.autoLock) autoLockMinutes = Number(changes.autoLock.newValue) || 10;
+    if (area === 'local' && changes.autoLock) {
+      autoLockMinutes = parseAutoLock(changes.autoLock.newValue) ?? AUTO_LOCK_DEFAULT;
+      // restart the countdown with the new length (or stop it) while unlocked
+      void bridge?.lockState().then((s) => s.unlocked && touch());
+    }
   });
 }
 

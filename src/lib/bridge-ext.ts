@@ -25,6 +25,9 @@ export async function createBridge(): Promise<Bridge> {
     ...b,
     kind: 'web' as const,
     defaultServer: () => '',
+    // read by the service worker's idle alarm (background.ts)
+    autoLockMinutes: async () => (await chrome.storage.local.get('autoLock')).autoLock,
+    setAutoLockMinutes: (minutes: number) => chrome.storage.local.set({ autoLock: minutes }),
     quickUnlockStatus: async () => ({ available: false, enabled: false, label: '' }),
     setQuickUnlock: async () => {
       throw { code: 'invalid', message: '扩展不支持生物识别解锁（可在桌面端开启）' };
