@@ -19,7 +19,7 @@ Chrome / Edge（Chromium 内核）的 Manifest V3 扩展：自动填充登录、
 - 完整密码库：`vault.html`，与网页版 / 桌面端同一套界面（common/web）。
 - 自动锁定：空闲超时、系统锁屏（可在工具栏弹窗 ⚙ 里关闭）；会话密钥只保存在 `chrome.storage.session`（内存），浏览器关闭即失效。
 - 复制的密码 90 秒后从剪贴板清除（offscreen 文档）。
-- 由桌面端解锁（Native Messaging，可选）：弹窗 ⚙ 打开“由桌面端解锁”（`nativeMessaging` 是必需权限：Chrome 只在 Service Worker 启动时提供 `runtime.connectNative`，事后授予的可选权限用不了；安装时 Chrome 会显示“与协作的本机应用通信”），把显示的扩展 ID 填到桌面端“设置 → 浏览器扩展联动”，再点“与桌面端配对”并在桌面端确认同样的 6 位数字。之后桌面端已解锁时，打开弹窗或内联菜单即自动解锁；桌面端锁定时，**打开弹窗**或**点输入框里的 NyaPassword 按钮**（或菜单里的“用桌面端解锁”）会让桌面端弹出它自己的解锁窗口（主密码 / Windows Hello / PIN），在桌面端解锁后扩展跟着解锁，等待时弹窗 / 菜单显示“请在 NyaPassword 桌面端完成解锁”，主密码输入框照常可用（最多等 2 分钟，同一时间一个请求，`src/lib/desktop-unlock.ts`）；桌面端没运行时由它的 Native Messaging 宿主先启动它。内联菜单自己弹出、页面加载时不会把桌面端弹出来。桌面端锁定时已连接的扩展也锁定。扩展本身没有 PIN。扩展的配对私钥是不可导出的 WebCrypto P-256 密钥（IndexedDB），账户密钥由桌面端封装给它（`src/lib/desktop-link.ts`；协议见 `../desktop/src-tauri/src/browser_bridge.rs` 和桌面端 README）。没有固定 `key` 时，解压加载的扩展 ID 随路径变化，换路径要重新填写和配对。
+- 由桌面端解锁（Native Messaging，可选）：弹窗 ⚙ 打开“由桌面端解锁”（`nativeMessaging` 是必需权限：Chrome 只在 Service Worker 启动时提供 `runtime.connectNative`，事后授予的可选权限用不了；安装时 Chrome 会显示“与协作的本机应用通信”），在桌面端“设置 → 浏览器扩展联动”打开联动（商店版扩展的 ID 已内置；解压加载的扩展要把弹窗里显示的扩展 ID 填到“其他扩展 ID”），再点“与桌面端配对”并在桌面端确认同样的 6 位数字。之后桌面端已解锁时，打开弹窗或内联菜单即自动解锁；桌面端锁定时，**打开弹窗**或**点输入框里的 NyaPassword 按钮**（或菜单里的“用桌面端解锁”）会让桌面端弹出它自己的解锁窗口（主密码 / Windows Hello / PIN），在桌面端解锁后扩展跟着解锁，等待时弹窗 / 菜单显示“请在 NyaPassword 桌面端完成解锁”，主密码输入框照常可用（最多等 2 分钟，同一时间一个请求，`src/lib/desktop-unlock.ts`）；桌面端没运行时由它的 Native Messaging 宿主先启动它。内联菜单自己弹出、页面加载时不会把桌面端弹出来。桌面端锁定时已连接的扩展也锁定。扩展本身没有 PIN。扩展的配对私钥是不可导出的 WebCrypto P-256 密钥（IndexedDB），账户密钥由桌面端封装给它（`src/lib/desktop-link.ts`；协议见 `../desktop/src-tauri/src/browser_bridge.rs` 和桌面端 README）。没有固定 `key` 时，解压加载的扩展 ID 随路径变化，换路径要重新填写和配对。
 
 ## 开发
 
