@@ -424,7 +424,9 @@ export default defineContentScript({
     addEventListener('scroll', reposition, { passive: true, capture: true });
     addEventListener('resize', reposition, { passive: true });
 
+    let lastMutation = Date.now();
     const mo = new MutationObserver(() => {
+      lastMutation = Date.now();
       clearTimeout(scanTimer);
       scanTimer = setTimeout(rescan, 400);
     });
@@ -465,15 +467,60 @@ export default defineContentScript({
       }
     });
 
+    // ------------------------------------------------------------ fill on page load (optional)
+
+    // the user typed or clicked: the page is theirs, no more automatic filling
+    let userActed = false;
+    const acted = (e: Event) => {
+      if (e.isTrusted) userActed = true;
+    };
+    addEventListener('keydown', acted, { capture: true, passive: true });
+    addEventListener('pointerdown', acted, { capture: true, passive: true });
+
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const loginForm = () => forms.find((f) => f.password && !f.isNew && isVisible(f.password));
+
+    /** Page loaded and its DOM quiet for a moment: frameworks render / hydrate after document_idle and may replace the form. */
+    async function settled() {
+      if (document.readyState !== 'complete') await Promise.race([new Promise((r) => addEventListener('load', r, { once: true })), sleep(5000)]);
+      const start = Date.now();
+      while (Date.now() - lastMutation < 600 && Date.now() - start < 4000) await sleep(150);
+    }
+
+    /**
+     * Waits for the page to settle (and for a login form, which a single-page
+     * app may render later), then asks the service worker to fill; when the
+     * page re-renders the form and drops the values, asks again (a few times).
+     */
+    async function fillOnLoad() {
+      const deadline = Date.now() + 15000;
+      let tries = 0;
+      while (!userActed && Date.now() < deadline) {
+        await settled();
+        if (userActed) return;
+        rescan();
+        if (!loginForm()) {
+          await sleep(500);
+          continue;
+        }
+        // the service worker decides (exactly one match); false: nothing to fill
+        if (!(await send<boolean>({ t: 'autofill:load' }).catch(() => false))) return;
+        await sleep(1500);
+        rescan();
+        if (userActed || loginForm()?.password?.value) return;
+        if (++tries >= 3) return;
+      }
+    }
+
     // ------------------------------------------------------------ start
 
     rescan();
-    hello = send<{ signedIn?: boolean; prompt?: string }>({ t: 'hello' })
+    hello = send<{ signedIn?: boolean; prompt?: string; fillOnLoad?: boolean }>({ t: 'hello' })
       .then((r) => {
         signedIn = !!r.signedIn || !!r.prompt;
         if (r.prompt) openPrompt(r.prompt);
-        // the service worker decides (setting off by default, exactly one match, https)
-        else if (signedIn && forms.some((f) => f.password && !f.isNew)) void send({ t: 'autofill:load' }).catch(() => {});
+        // (setting off by default; https; not in a frame of another site)
+        else if (signedIn && r.fillOnLoad) void fillOnLoad();
       })
       .catch(() => {});
   },

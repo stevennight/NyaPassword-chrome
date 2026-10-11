@@ -463,7 +463,9 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
         pendingPrompt.delete(tabId);
         return { prompt: p.n };
       }
-      return { signedIn: st.signed_in };
+      // fillOnLoad: whether the frame should wait for its login form and ask `autofill:load`
+      const { autofillOnLoad } = await chrome.storage.local.get('autofillOnLoad');
+      return { signedIn: st.signed_in, fillOnLoad: autofillOnLoad === true && st.unlocked && secureContext(url) && !crossSite(sender) };
     }
     case 'inline:open': {
       if (!st.signed_in) return null;

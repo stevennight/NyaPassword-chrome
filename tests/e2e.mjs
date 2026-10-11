@@ -286,6 +286,12 @@ try {
   await plain.reload();
   const filledOnLoad = await waitFor(async () => ((await plain.inputValue('#pwd')) === 'new-password-2' ? true : undefined), 8000).catch(() => false);
   check('fill on page load: off by default, works when turned on', untouched && filledOnLoad);
+  // the page replaces its form after load (framework hydration): the fill must survive
+  const hydrated = await ctx.newPage();
+  await hydrated.goto(`http://127.0.0.1:${FIXTURE_PORT}/rerender.html`);
+  await hydrated.waitForTimeout(4000);
+  const keptPwd = await hydrated.inputValue('#pwd');
+  check('fill on page load: survives the page re-rendering its form', keptPwd === 'new-password-2', JSON.stringify(keptPwd));
   await vaultPage.evaluate(() => chrome.storage.local.set({ autofillOnLoad: false }));
 
   // ---- a login form of another site embedded in the page: no automatic menu, a warning when asked
