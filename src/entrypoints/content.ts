@@ -385,6 +385,9 @@ export default defineContentScript({
       'focusin',
       async (e) => {
         const el = e.target;
+        // focus moved on (e.g. Tab to the next field): the menu of the previous
+        // field would cover it (focus inside our menu reaches here as the host)
+        if (!filling && el !== host && ([...frames.values()].some((f) => f.kind === 'menu' && f.field && f.field !== el) || (remote && remote.field !== el))) closeMenus();
         if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement) || filling) return;
         await hello;
         if (!signedIn) return;
