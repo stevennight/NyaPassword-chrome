@@ -85,7 +85,7 @@
       busy = false;
     }
   }
-  const generate = () => send({ t: 'ctx:generate', n }).catch((e) => (error = e.message));
+  const generate = (what: 'password' | 'username' = 'password') => send({ t: 'ctx:generate', n, what }).catch((e) => (error = e.message));
   const close = () => send({ t: 'ctx:cancel', n });
   const openVault = () => chrome.tabs.create({ url: chrome.runtime.getURL('/vault.html') });
   // card / identity menus list every such item; login menus only this site's
@@ -144,7 +144,9 @@
       {/each}
     </div>
     <div class="foot">
-      {#if template === 'login' && (ctx.isNew || ctx.fieldKind === 'password')}<button onclick={generate}>⚿ 生成强密码</button>{/if}
+      <!-- a sign-up form (or a site with no saved login) may want a new username -->
+      {#if template === 'login' && ctx.fieldKind === 'username' && !ctx.email && (ctx.isNew || !ctx.candidates?.length)}<button onclick={() => generate('username')}>生成用户名</button>{/if}
+      {#if template === 'login' && (ctx.isNew || ctx.fieldKind === 'password')}<button onclick={() => generate()}>⚿ 生成强密码</button>{/if}
       <span class="grow"></span>
       <button onclick={openVault}>打开 NyaPassword</button>
     </div>
@@ -163,7 +165,7 @@
   .t, .s { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .s { font-size: 12px; color: var(--text-2); }
   .empty { padding: 18px 8px; color: var(--text-3); font-size: 13px; text-align: center; }
-  .foot { display: flex; gap: 6px; border-top: 1px solid var(--border); padding: 6px 8px; }
+  .foot { display: flex; flex-wrap: wrap; gap: 2px 6px; border-top: 1px solid var(--border); padding: 6px 8px; }
   .foot button { border: 0; background: none; color: var(--accent); font-size: 12.5px; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
   .foot button:hover { background: var(--surface-2); }
   .unlock { display: flex; gap: 6px; padding: 10px; }

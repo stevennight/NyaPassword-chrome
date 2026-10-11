@@ -238,9 +238,10 @@ export default defineContentScript({
       const form = loginFormOf(el);
       const profile = form ? undefined : profileOf(el, profiles);
       const fieldKind = profile ? profile.kind : form?.otp === el ? 'otp' : form?.username === el ? 'username' : 'password';
+      const email = fieldKind === 'username' && el instanceof HTMLInputElement && (el.type === 'email' || /email/i.test(el.autocomplete) || /e-?mail|邮箱/i.test(`${el.name} ${el.id} ${el.placeholder}`));
       let r: { n: string; count: number; crossSite?: boolean } | null;
       try {
-        r = await send<{ n: string; count: number; crossSite?: boolean } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew, explicit });
+        r = await send<{ n: string; count: number; crossSite?: boolean } | null>({ t: 'inline:open', fieldKind, isNew: !!form?.isNew, email, explicit });
       } catch {
         return;
       }
@@ -310,7 +311,9 @@ export default defineContentScript({
       const form = (active && loginFormOf(active)) ?? forms.find((f) => f.password && !f.isNew) ?? forms[0];
       if (!form) return;
       filling = true;
-      if (msg.generated) {
+      if (msg.generatedUsername) {
+        if (form.username) setValue(form.username, msg.generatedUsername);
+      } else if (msg.generated) {
         if (form.password) setValue(form.password, msg.generated);
         if (form.confirm) setValue(form.confirm, msg.generated);
       } else {
@@ -319,7 +322,8 @@ export default defineContentScript({
         if (form.otp && msg.totp) setValue(form.otp, msg.totp);
       }
       filling = false;
-      filledAt = Date.now();
+      // (a generated username: the password field next may still open its menu, for a generated password)
+      if (!msg.generatedUsername) filledAt = Date.now();
       if (msg.n) closeFrame(msg.n);
       closeMenus();
       hideIcon();

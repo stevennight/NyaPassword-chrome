@@ -29,6 +29,8 @@ export interface Context {
   /** fill: 'username' | 'password' | 'otp' for logins, 'card' | 'identity' for profiles */
   fieldKind?: string;
   isNew?: boolean;
+  /** fill: the field takes an email address (no generated username then) */
+  email?: boolean;
   candidates?: Candidate[];
   /** save */
   offer?: 'new' | 'update';
@@ -71,7 +73,7 @@ export interface SaveEdit {
 
 export type ContentRequest =
   /** `explicit`: the user clicked the NyaPassword button (may ask the desktop app to unlock). */
-  | { t: 'inline:open'; fieldKind: string; isNew: boolean; explicit?: boolean }
+  | { t: 'inline:open'; fieldKind: string; isNew: boolean; email?: boolean; explicit?: boolean }
   /** A subframe's menu: shown by the top frame at `rect`, so the subframe's size cannot clip it. */
   | { t: 'inline:show'; n: string; rect: Rect }
   /** A menu shown in another frame than its field's was closed (from either frame). */
@@ -90,7 +92,8 @@ export type PageRequest =
   | { t: 'ctx:desktop'; n: string }
   | { t: 'ctx:verify'; n: string; vault_id: string; item_id: string; password: string }
   | { t: 'ctx:fill'; n: string; vault_id: string; item_id: string }
-  | { t: 'ctx:generate'; n: string }
+  /** Fill a generated password (default) or, on a username field, a generated username. */
+  | { t: 'ctx:generate'; n: string; what?: 'password' | 'username' }
   | { t: 'ctx:save'; n: string; vault_id?: string; never?: boolean; edit?: SaveEdit }
   /** The prompt's content height, so its iframe covers no more of the page than needed. */
   | { t: 'ctx:resize'; n: string; h: number }
@@ -125,7 +128,7 @@ export interface DesktopStatus {
 }
 
 export type ToContent =
-  | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string; profile?: Record<string, string> }
+  | { t: 'fill'; n?: string; username?: string; password?: string; totp?: string; generated?: string; generatedUsername?: string; profile?: Record<string, string> }
   | { t: 'close'; n: string }
   | { t: 'passkey:result'; reqId: string; response?: unknown; error?: { name: string; message: string }; fallback?: boolean }
   | { t: 'show:prompt'; n: string }

@@ -27,6 +27,7 @@ interface Ctx extends Verifiable {
   created: number;
   fieldKind?: string;
   isNew?: boolean;
+  email?: boolean;
   capture?: { username: string; password: string };
   generated?: string;
   passkey?: { op: 'create' | 'get'; request: string; reqId: string };
@@ -468,7 +469,7 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
       if (!st.signed_in) return null;
       const n = nonce();
       const cross = crossSite(sender);
-      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew, topHost: cross ? npw.displayHost(sender.tab!.url!) : undefined, explicit: msg.explicit === true });
+      contexts.set(n, { kind: 'fill', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), fieldKind: msg.fieldKind, isNew: msg.isNew, email: msg.email === true, topHost: cross ? npw.displayHost(sender.tab!.url!) : undefined, explicit: msg.explicit === true });
       await saveContexts();
       const count = st.unlocked ? (isProfile(msg.fieldKind) ? await profileCandidates(msg.fieldKind) : await candidates(url)).length : -1;
       return { n, count, crossSite: cross };
@@ -585,7 +586,7 @@ async function ctxView(n: string): Promise<Context> {
     return view;
   }
   const vaults = (await b.vaults()).map((v) => ({ id: v.id, name: v.name }));
-  if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, candidates: isProfile(c.fieldKind) ? await profileCandidates(c.fieldKind!) : await candidates(c.url) });
+  if (c.kind === 'fill') Object.assign(view, { fieldKind: c.fieldKind, isNew: c.isNew, email: c.email, candidates: isProfile(c.fieldKind) ? await profileCandidates(c.fieldKind!) : await candidates(c.url) });
   if (c.kind === 'save' && c.capture) {
     const list = await candidates(c.url);
     let updateTitle: string | undefined;
@@ -720,6 +721,12 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
       const c = contexts.get(msg.n);
       if (!c) throw { code: 'not_found', message: 'expired' };
       await requireVisibleMenu(c, msg.n);
+      if (msg.what === 'username') {
+        if (c.fieldKind !== 'username') throw { code: 'forbidden', message: 'not a username field' };
+        const u = npw.generate({ kind: 'username', style: 'words', words: 2, separator: '', capitalize: true, digits: true }) as { password: string };
+        await chrome.tabs.sendMessage(c.tabId, { t: 'fill', n: msg.n, generatedUsername: u.password } satisfies ToContent, { frameId: c.frameId });
+        return true;
+      }
       const g = npw.generate({ kind: 'random', length: 20, upper: true, lower: true, digits: true, symbols: true, avoid_ambiguous: true }) as { password: string };
       c.generated = g.password;
       await saveContexts();
