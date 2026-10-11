@@ -16,7 +16,8 @@ export async function createBridge(): Promise<Bridge> {
     'lockState', 'register', 'signIn', 'unlock', 'lock', 'signOut', 'emergencyKit', 'sync', 'eventsToken', 'vaults', 'createVault', 'renameVault',
     'listItems', 'item', 'tags', 'newItem', 'saveItem', 'deleteItem', 'restoreItem', 'resolveConflict', 'attention', 'itemHistory', 'itemRevision',
     'restoreRevision', 'purge', 'removeAttachment', 'importCommit', 'importBatches', 'undoImport', 'securityReport', 'healthCheck', 'changePassword',
-    'devices', 'revokeDevice', 'auditLog', 'verifyUser', 'verifyUserOptions',
+    'devices', 'revokeDevice', 'auditLog', 'verifyUser', 'verifyUserOptions', 'tagCounts', 'bulkUpdate', 'renameTag', 'deleteTag',
+    'duplicates', 'mergeItems',
   ] as const;
   const b: Record<string, unknown> = {};
   for (const m of asyncMethods) b[m] = (...a: unknown[]) => call(m, ...a);
