@@ -122,6 +122,8 @@
   }
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key !== 'Escape') return; if (verifying) { verifying = null; error = ''; } else void cancel(); }} />
+
 <div class="box" bind:this={box}>
 <div class="in">
   <div class="h"><Logo size={22} /><b class="grow">NyaPassword</b><span class="faint small">{ctx?.host ?? ''}</span></div>
@@ -228,6 +230,12 @@
       <button class="btn ghost sm" onclick={() => cancel(true)}>使用其他设备</button>
       <span class="spacer"></span>
       <button class="btn" onclick={() => cancel()}>取消</button>
+    </div>
+  {:else if error}
+    <!-- the prompt expired (or could not load): it can still be closed -->
+    <div class="acts">
+      <span class="spacer"></span>
+      <button class="btn" onclick={() => cancel()}>关闭</button>
     </div>
   {/if}
 </div>

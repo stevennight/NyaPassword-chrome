@@ -17,6 +17,7 @@ import { b64, unb64 } from '../lib/rpc';
 import { clearPairing, DesktopPort, generatePairingKey, HOST_NAME, loadPairing, pairingCode, rawPublicKey, requestAccountKey, savePairing, type Pairing } from '../lib/desktop-link';
 import { DesktopUnlocker } from '../lib/desktop-unlock';
 import { consume, grant, loadTarget, saveOffer, shortcutTarget, type Verifiable } from '../lib/reprompt';
+import { closeTarget, replacedSaves } from '../lib/prompts';
 
 interface Ctx extends Verifiable {
   kind: Context['kind'];
@@ -517,6 +518,12 @@ async function fromContent(msg: ContentRequest, sender: chrome.runtime.MessageSe
         offer = saveOffer(saved, msg.username, msg.password);
       }
       if (!offer) return null;
+      // (e.g. a wrong password, then the right one) only the latest login is offered: prompts never stack
+      for (const old of replacedSaves(contexts, tabId)) {
+        const c = contexts.get(old)!;
+        contexts.delete(old);
+        await chrome.tabs.sendMessage(tabId, { t: 'close', n: old } satisfies ToContent, { frameId: shownIn(c) }).catch(() => {});
+      }
       const n = nonce();
       contexts.set(n, { kind: 'save', tabId, frameId: sender.frameId ?? 0, origin, url, created: Date.now(), capture: { username: msg.username, password: msg.password } });
       await saveContexts();
@@ -661,7 +668,7 @@ async function showPromptInTop(tabId: number, n: string) {
 const BINARY_ARGS: Record<string, number[]> = { addAttachment: [4], importPreview: [1] };
 const BINARY_RESULT = new Set(['attachment', 'exportVault']);
 
-async function fromPage(msg: PageRequest): Promise<unknown> {
+async function fromPage(msg: PageRequest, sender: chrome.runtime.MessageSender): Promise<unknown> {
   const b = await core();
   touch();
   switch (msg.t) {
@@ -793,8 +800,12 @@ async function fromPage(msg: PageRequest): Promise<unknown> {
     case 'ctx:cancel': {
       const c = contexts.get(msg.n);
       if (c?.passkey) await finishPasskey(c, msg.fallback ? { fallback: true } : { error: { name: 'NotAllowedError', message: 'The user cancelled' } });
-      if (c) await chrome.tabs.sendMessage(c.tabId, { t: 'close', n: msg.n } satisfies ToContent, { frameId: shownIn(c) }).catch(() => {});
+      // also without its context (expired while the prompt stayed open): the iframe's tab closes it
+      const to = closeTarget(c && { tabId: c.tabId, frameId: shownIn(c) }, sender.tab?.id);
+      if (to) await chrome.tabs.sendMessage(to.tabId, { t: 'close', n: msg.n } satisfies ToContent, to.frameId === undefined ? {} : { frameId: to.frameId }).catch(() => {});
       contexts.delete(msg.n);
+      // the next page of the site must not show it again
+      for (const [tab, p] of pendingPrompt) if (p.n === msg.n) pendingPrompt.delete(tab);
       await saveContexts();
       return true;
     }
@@ -946,7 +957,7 @@ function registerListeners() {
     const run = async () => {
       if (msg.t === 'call' || msg.t.startsWith('ctx:') || msg.t.startsWith('popup:') || msg.t.startsWith('desktop:')) {
         if (!page) throw { code: 'forbidden', message: 'not allowed from web pages' };
-          return fromPage(msg as PageRequest);
+          return fromPage(msg as PageRequest, sender);
       }
       if (page) throw { code: 'forbidden', message: 'content-script message from an extension page' };
       return fromContent(msg as ContentRequest, sender);
